@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,7 +22,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '1.0.0';
+const String kAppVersion = '1.0.1';
 
 bool isInternalUrl(Uri uri) {
   final h = uri.host;
@@ -91,7 +93,9 @@ class _ShellPageState extends State<ShellPage> {
   double _progress = 0;
   bool _loadError = false;
   String _errMsg = '';
+  bool _pageBlank = false;
   DateTime? _lastBackAt;
+  Timer? _blankTimer;
 
   @override
   void initState() {
@@ -100,6 +104,53 @@ class _ShellPageState extends State<ShellPage> {
       settings: PullToRefreshSettings(color: const Color(0xFF1A73E8)),
       onRefresh: () async => _web?.reload(),
     );
+    // #2470 的官方示例级修复：Flutter 3.24→3.27 后平台视图首帧偶发整屏白，
+    // 关掉 native view 层级同步可避免（配合 useHybridComposition: true）。
+    try {
+      SystemChannels.platform_views
+          .invokeMethod<void>('synchronizeToNativeViewHierarchy', false);
+    } catch (_) {}
+  }
+
+  /// 页面加载完成后延迟检测「JS 跑了但页面空白」：
+  /// 单页应用若在 WebView 里因 JS 错误/容器兼容挂了，body 会一直空着。
+  /// 只针对主框架加载完成后的首次渲染，5 秒后 body 仍无可见文本 → 判定空白。
+  void _scheduleBlankCheck() {
+    _blankTimer?.cancel();
+    _blankTimer = Timer(const Duration(seconds: 5), () async {
+      final w = _web;
+      if (w == null || !mounted) return;
+      try {
+        final r = await w.evaluateJavascript(source: '''
+          (function() {
+            var rm = document.getElementById('root-master');
+            var rootChildren = rm ? rm.children.length : -1;
+            var bodyText = (document.body && document.body.innerText || '').length;
+            var rootText = (rm && rm.innerText || '').length;
+            return JSON.stringify({rootChildren: rootChildren, bodyText: bodyText, rootText: rootText});
+          })()
+        ''');
+        if (!mounted) return;
+        if (r == null) return;
+        // evaluateJavascript 返回的是 JSON 字符串（可能再包一层引号）
+        final raw = (r as String).trim();
+        final decoded = raw.startsWith('{') ? raw : _unwrapQuoted(raw);
+        final info = jsonDecode(decoded) as Map;
+        final rootChildren = (info['rootChildren'] as num?)?.toInt() ?? -1;
+        final bodyText = (info['bodyText'] as num?)?.toInt() ?? -1;
+        final blank = rootChildren == 0 && bodyText == 0;
+        if (blank) setState(() => _pageBlank = true);
+      } catch (_) {}
+    });
+  }
+
+  static String _unwrapQuoted(String s) {
+    var t = s.trim();
+    while (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) ||
+        (t.startsWith("'") && t.endsWith("'")))) {
+      t = t.substring(1, t.length - 1);
+    }
+    return t;
   }
 
   Future<bool> _handleBack() async {
@@ -289,6 +340,10 @@ class _ShellPageState extends State<ShellPage> {
                   verticalScrollBarEnabled: false,
                   cacheEnabled: true,
                   clearCache: false,
+                  // 混合合成（插件默认）：绝大多数现代设备正常。
+                  // 个别设备 texture 模式（useHybridComposition: false）会整屏白；
+                  // #2470 的反向案例（hybrid 首帧白）已由 initState 里的
+                  // synchronizeToNativeViewHierarchy(false) 兜底。
                   useHybridComposition: true,
                   allowsInlineMediaPlayback: true,
                   // 允许站内 https；明文一律拒绝（见 network_security_config）
@@ -300,11 +355,18 @@ class _ShellPageState extends State<ShellPage> {
                 pullToRefreshController: _ptr,
                 onWebViewCreated: (c) => _web = c,
                 onLoadStart: (c, url) {
-                  if (mounted) setState(() => _loadError = false);
+                  if (mounted) {
+                    setState(() {
+                      _loadError = false;
+                      _pageBlank = false;
+                    });
+                  }
+                  _blankTimer?.cancel();
                 },
                 onLoadStop: (c, url) async {
                   await _ptr?.endRefreshing();
                   if (mounted) setState(() => _progress = 1.0);
+                  _scheduleBlankCheck();
                 },
                 onProgressChanged: (c, p) {
                   if (mounted) setState(() => _progress = p / 100.0);
@@ -370,6 +432,48 @@ class _ShellPageState extends State<ShellPage> {
                                     URLRequest(url: WebUri(kHomeUrl)));
                               },
                               child: const Text('重试'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (_pageBlank)
+                Positioned.fill(
+                  child: ColoredBox(
+                    color: Theme.of(context).colorScheme.surface,
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.browser_not_supported_outlined, size: 56),
+                            const SizedBox(height: 16),
+                            const Text('页面空白（可能是网页在 WebView 里没跑起来）',
+                                style: TextStyle(fontSize: 16)),
+                            const SizedBox(height: 8),
+                            const Text('可重试，或直接用手机浏览器打开',
+                                style: TextStyle(fontSize: 13)),
+                            const SizedBox(height: 20),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                FilledButton(
+                                  onPressed: () {
+                                    setState(() => _pageBlank = false);
+                                    _web?.loadUrl(urlRequest:
+                                        URLRequest(url: WebUri(kHomeUrl)));
+                                  },
+                                  child: const Text('重试'),
+                                ),
+                                const SizedBox(width: 12),
+                                OutlinedButton(
+                                  onPressed: _openInBrowser,
+                                  child: const Text('用浏览器打开'),
+                                ),
+                              ],
                             ),
                           ],
                         ),
