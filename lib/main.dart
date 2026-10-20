@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// 百宝箱安卓壳 —— 把 https://m.tbox.cn/agents/home 装进独立 App。
@@ -22,7 +21,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '1.0.2';
+const String kAppVersion = '1.0.3';
 
 bool isInternalUrl(Uri uri) {
   final h = uri.host;
@@ -45,15 +44,26 @@ bool compareVersion(String a, String b) {
   return false;
 }
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  final prefs = await SharedPreferences.getInstance();
-  runApp(BaibaoxiangApp(prefs: prefs));
+  // 任何构建错误直接显示成可见文字，不再是无解白屏
+  ErrorWidget.builder = (details) => Material(
+        color: const Color(0xFF1A73E8),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              '页面出错了，请把这个提示告诉开发者：\n${details.exception}',
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+          ),
+        ),
+      );
+  runApp(const BaibaoxiangApp());
 }
 
 class BaibaoxiangApp extends StatefulWidget {
-  const BaibaoxiangApp({super.key, required this.prefs});
-  final SharedPreferences prefs;
+  const BaibaoxiangApp({super.key});
 
   @override
   State<BaibaoxiangApp> createState() => _BaibaoxiangAppState();
@@ -94,12 +104,20 @@ class _ShellPageState extends State<ShellPage> {
   bool _loadError = false;
   String _errMsg = '';
   bool _pageBlank = false;
+  bool _webReady = false;
   DateTime? _lastBackAt;
   Timer? _blankTimer;
 
   @override
   void initState() {
     super.initState();
+    // WebView 延后到首帧之后再创建：平台视图在首帧里挂载，个别设备上会卡住整帧，
+    // 导致标题栏/UI 全都画不出来（整屏白）。先渲染 UI，再挂 WebView。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future<void>.delayed(const Duration(milliseconds: 300), () {
+        if (mounted) setState(() => _webReady = true);
+      });
+    });
     _ptr = PullToRefreshController(
       settings: PullToRefreshSettings(color: const Color(0xFF1A73E8)),
       onRefresh: () async => _web?.reload(),
@@ -325,7 +343,10 @@ class _ShellPageState extends State<ShellPage> {
           ),
           body: Stack(
             children: [
-              InAppWebView(
+              if (!_webReady)
+                const _LaunchingView()
+              else
+                InAppWebView(
                 initialUrlRequest: URLRequest(url: WebUri(kHomeUrl)),
                 initialSettings: InAppWebViewSettings(
                   userAgent: kMobileUa,
@@ -483,6 +504,29 @@ class _ShellPageState extends State<ShellPage> {
                 ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 启动占位：首帧先渲染它，WebView 延后挂载。
+/// 颜色刻意不用纯白——如果用户看到这个浅色页，说明 Flutter UI 正常、问题在 WebView。
+class _LaunchingView extends StatelessWidget {
+  const _LaunchingView();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ColoredBox(
+      color: Color(0xFFF2F5FA),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.widgets_outlined, size: 56, color: Color(0xFF1A73E8)),
+            SizedBox(height: 16),
+            Text('正在启动百宝箱…', style: TextStyle(fontSize: 15)),
+          ],
         ),
       ),
     );
