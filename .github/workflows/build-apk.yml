@@ -1,0 +1,65 @@
+name: build-apk
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: flutter version
+        run: flutter --version
+
+      - name: pub get
+        run: flutter pub get
+
+      # AGP 9 移除了 getDefaultProguardFile('proguard-android.txt')，
+      # 而 flutter_inappwebview_android 仍在用 → 在构建前就地打补丁（官方 beta 才修）。
+      - name: patch flutter_inappwebview_android for AGP9
+        run: |
+          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android*/android/build.gradle" -print0 \
+            | xargs -0 -r sed -i "s/proguard-android\.txt/proguard-android-optimize.txt/g"
+          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android*/android/build.gradle" -exec grep -Hn "proguard-android" {} \; || true
+
+      - name: analyze
+        run: flutter analyze
+
+      - name: test
+        run: flutter test
+
+      - name: build apk (release, per-abi)
+        # --no-pub：不然 build 会重跑 pub get，把上面打的插件补丁重新解包覆盖掉
+        run: flutter build apk --release --split-per-abi --no-pub
+
+      - name: rename artifacts
+        run: |
+          cd build/app/outputs/flutter-apk
+          for f in app-*-release.apk; do
+            abi=$(echo "$f" | sed -E 's/app-(.+)-release\.apk/\1/')
+            cp "$f" "baibaoxiang-$abi.apk"
+          done
+          ls -la
+
+      - name: upload apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: baibaoxiang-apk
+          path: build/app/outputs/flutter-apk/baibaoxiang-*.apk
+          if-no-files-found: error
