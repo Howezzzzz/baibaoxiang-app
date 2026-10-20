@@ -2,15 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// 百宝箱安卓壳 —— 把 https://m.tbox.cn/agents/home 装进独立 App。
+/// 百宝箱安卓壳 —— 把 https://www.tbox.cn/agents/home 装进独立 App。
 /// 非官方、自用。站内跳转留在壳内，外站/外部 scheme 交系统。
-const String kHomeUrl = 'https://m.tbox.cn/agents/home';
+const String kHomeUrl = 'https://www.tbox.cn/agents/home';
 
 /// 站内域（含子域）：其余一律视为外链 → 系统浏览器。
 const List<String> kInternalDomains = <String>['tbox.cn'];
@@ -21,7 +22,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '1.0.3';
+const String kAppVersion = '1.0.4';
 
 bool isInternalUrl(Uri uri) {
   final h = uri.host;
@@ -105,6 +106,12 @@ class _ShellPageState extends State<ShellPage> {
   String _errMsg = '';
   bool _pageBlank = false;
   bool _webReady = false;
+  /// 最近 N 条页面 console（JS 报错定位用，随空白诊断展示）。
+  final List<String> _consoleLines = <String>[];
+  /// 空白判定时的诊断快照（URL/标题/节点量/console），显示在空白提示页上。
+  String _diag = '';
+  /// 加载代际计数：每次新导航自增；空白检测回调用它丢弃过期结果（防竞态误报）。
+  int _loadGen = 0;
   DateTime? _lastBackAt;
   Timer? _blankTimer;
 
@@ -132,10 +139,12 @@ class _ShellPageState extends State<ShellPage> {
 
   /// 页面加载完成后延迟检测「JS 跑了但页面空白」：
   /// 单页应用若在 WebView 里因 JS 错误/容器兼容挂了，body 会一直空着。
-  /// 只针对主框架加载完成后的首次渲染，5 秒后 body 仍无可见文本 → 判定空白。
+  /// 只针对主框架加载完成后的首次渲染，8 秒后 body 仍无可见文本 → 判定空白；
+  /// 判定时同时抓一份诊断快照（URL/标题/节点量/console 最近输出），显示在提示页上。
   void _scheduleBlankCheck() {
     _blankTimer?.cancel();
-    _blankTimer = Timer(const Duration(seconds: 5), () async {
+    final gen = _loadGen; // 捕获本次导航的代际，回调结果过期则丢弃
+    _blankTimer = Timer(const Duration(seconds: 8), () async {
       final w = _web;
       if (w == null || !mounted) return;
       try {
@@ -149,6 +158,7 @@ class _ShellPageState extends State<ShellPage> {
           })()
         ''');
         if (!mounted) return;
+        if (gen != _loadGen) return; // 已进入新一次导航，丢弃过期判定
         if (r == null) return;
         // evaluateJavascript 返回的是 JSON 字符串（可能再包一层引号）
         final raw = (r as String).trim();
@@ -156,8 +166,25 @@ class _ShellPageState extends State<ShellPage> {
         final info = jsonDecode(decoded) as Map;
         final rootChildren = (info['rootChildren'] as num?)?.toInt() ?? -1;
         final bodyText = (info['bodyText'] as num?)?.toInt() ?? -1;
+        final rootText = (info['rootText'] as num?)?.toInt() ?? -1;
         final blank = rootChildren == 0 && bodyText == 0;
-        if (blank) setState(() => _pageBlank = true);
+        if (blank) {
+          var url = '';
+          var title = '';
+          try {
+            url = (await w.getUrl())?.toString() ?? '';
+            title = (await w.getTitle()) ?? '';
+          } catch (_) {}
+          if (!mounted) return;
+          if (gen != _loadGen) return; // 已进入新一次导航，丢弃过期判定
+          final console = _consoleLines.join('\n');
+          setState(() {
+            _pageBlank = true;
+            _diag = 'URL: $url\n标题: $title\n'
+                'rootChildren: $rootChildren / bodyText: $bodyText / rootText: $rootText\n'
+                '最近控制台输出:\n${console.isEmpty ? '（无）' : console}';
+          });
+        }
       } catch (_) {}
     });
   }
@@ -286,7 +313,7 @@ class _ShellPageState extends State<ShellPage> {
       applicationVersion: 'v$kAppVersion',
       children: const [
         SizedBox(height: 8),
-        Text('非官方客户端，仅供本人自用。内容与帐号均由 m.tbox.cn 提供，本应用不收集任何数据。'),
+        Text('非官方客户端，仅供本人自用。内容与帐号均由 www.tbox.cn 提供，本应用不收集任何数据。'),
       ],
     );
   }
@@ -376,13 +403,27 @@ class _ShellPageState extends State<ShellPage> {
                 pullToRefreshController: _ptr,
                 onWebViewCreated: (c) => _web = c,
                 onLoadStart: (c, url) {
+                  _loadGen++;
+                  _consoleLines.clear();
                   if (mounted) {
                     setState(() {
                       _loadError = false;
                       _pageBlank = false;
+                      _diag = '';
                     });
                   }
                   _blankTimer?.cancel();
+                },
+                onConsoleMessage: (c, m) {
+                  // 页面 JS 的 console 输出（含报错）——接住并留底，空白时随诊断展示
+                  final msg = m.message;
+                  if (kDebugMode) {
+                    debugPrint('[web-console] ${m.messageLevel}: $msg');
+                  }
+                  _consoleLines.add('${m.messageLevel}: $msg');
+                  if (_consoleLines.length > 12) {
+                    _consoleLines.removeAt(0);
+                  }
                 },
                 onLoadStop: (c, url) async {
                   await _ptr?.endRefreshing();
@@ -394,7 +435,7 @@ class _ShellPageState extends State<ShellPage> {
                 },
                 onReceivedError: (c, req, err) async {
                   await _ptr?.endRefreshing();
-                  if (!req.isForMainFrame!) return;
+                  if (req.isForMainFrame != true) return;
                   if (mounted) {
                     setState(() {
                       _loadError = true;
@@ -477,6 +518,22 @@ class _ShellPageState extends State<ShellPage> {
                             const SizedBox(height: 8),
                             const Text('可重试，或直接用手机浏览器打开',
                                 style: TextStyle(fontSize: 13)),
+                            if (_diag.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(maxHeight: 150),
+                                child: SingleChildScrollView(
+                                  child: SelectableText(
+                                    _diag,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontFamily: 'monospace',
+                                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 20),
                             Row(
                               mainAxisSize: MainAxisSize.min,
