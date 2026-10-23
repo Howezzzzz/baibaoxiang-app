@@ -28,7 +28,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.1';
+const String kAppVersion = '2.0.2';
 
 /// GeckoView 扩展桥（清缓存等官方接口没有的能力）。
 const MethodChannel kGeckoBridge = MethodChannel('dev.tbox.bbx/gecko_bridge');

@@ -36,8 +36,17 @@ jobs:
       - name: test
         run: flutter test
 
+      - name: decode release keystore
+        # 固定发布签名（存于 Actions secrets）：各版本同签名 → 支持覆盖升级
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
       - name: build apk (release, per-abi)
         # 只出 arm64-v8a + armeabi-v7a（GeckoView 内核体积大；x86_64 模拟器用户忽略不计，仍用 v1.0.5 老包）
+        env:
+          BBX_KEYSTORE: ${{ runner.temp }}/release.jks
+          BBX_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          BBX_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          BBX_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: flutter build apk --release --split-per-abi --target-platform android-arm64,android-arm --no-pub
 
       - name: rename artifacts
