@@ -34,6 +34,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // AGP 9 起 release 默认开 R8 混淆；壳应用无混淆收益，
+            // 且 GeckoView 内嵌 snakeyaml 引用桌面 JDK 的 java.beans 会缺类报错 → 关闭。
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
