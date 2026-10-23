@@ -14,7 +14,7 @@ let darkScript = null;
         darkScript = await browser.contentScripts.register({
             matches: ["<all_urls>"],
             js: [{ file: "dark_mode.js" }],
-            runAt: "document_end",
+            runAt: "document_start",
             allFrames: true,
         });
         console.info("bbx dark_mode content script registered");

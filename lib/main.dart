@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.10';
+const String kAppVersion = '2.0.11';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -96,28 +96,39 @@ NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
 /// 引擎本体是扩展自带的 content script（dark_mode.js），不经端口传大段代码。
 const String kDarkProbeJs = r'''
 (function () {
-  function lightCount() {
+  function scan() {
+    var res = { light: 0, susp: [], sh: 0, n: 0 };
     try {
-      var q = [document.documentElement], i = 0, n = 0, c = 0;
-      while (i < q.length && n < 3000) {
+      var q = [document.documentElement], i = 0;
+      while (i < q.length && res.n < 4000) {
         var e = q[i++];
         if (!e || e.nodeType !== 1) continue;
-        n++;
+        res.n++;
+        if (e.shadowRoot) res.sh++;
         var st = getComputedStyle(e);
         var bg = st.backgroundColor || '';
         var m = /rgba?\((\d+), ?(\d+), ?(\d+)/.exec(bg);
         if (m && bg.indexOf('rgba(0, 0, 0, 0)') < 0) {
           var l = (parseInt(m[1], 10) * 0.299 + parseInt(m[2], 10) * 0.587
             + parseInt(m[3], 10) * 0.114) / 255;
-          if (l > 0.5) c++;
+          if (l > 0.5) {
+            res.light++;
+            if (res.susp.length < 5) {
+              var cn = (typeof e.className === 'string' ? e.className : '')
+                .split(' ').filter(function (x) { return x; }).slice(0, 2).join('.');
+              res.susp.push(e.tagName.toLowerCase() + (cn ? '.' + cn : '') +
+                (e.getAttribute('data-bbx-dk') === null ? ' [未适配]' : ' [已适配]'));
+            }
+          }
         }
         var ch = e.children;
         for (var j = 0; j < ch.length; j++) q.push(ch[j]);
       }
-      return c;
-    } catch (e) { return -1; }
+    } catch (e) { res.susp.push('scan-error:' + e); }
+    return res;
   }
   try {
+    var p = scan();
     return JSON.stringify({
       e: typeof window.__bbxDark,
       st: !!document.getElementById('__bbx_dark_style'),
@@ -125,7 +136,9 @@ const String kDarkProbeJs = r'''
       bg: document.body ? getComputedStyle(document.body).backgroundColor : '',
       n: document.querySelectorAll('*').length,
       fr: window.frames.length,
-      light: lightCount(),
+      sh: p.sh,
+      light: p.light,
+      susp: p.susp,
       err: window.__bbxDarkErr || '',
       stats: window.__bbxDarkStats || null
     });

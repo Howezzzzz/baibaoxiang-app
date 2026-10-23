@@ -32,12 +32,14 @@ body { background: #ffffff; color: #222222; }
 .hidden { display: none; background-color: #ffffff; }
 .grad { background-image: linear-gradient(rgb(255, 255, 255), rgb(240, 240, 240)); }
 .darkbtn { background-color: #0b3d91; color: #ffffff; }
+.icon path { fill: #333333; }
 </style></head><body>
 <div class="card">卡片文字<span class="btn">按钮</span></div>
 <div class="overlay">遮罩</div>
 <div class="hidden">隐藏块</div>
 <div class="grad">渐变块</div>
 <div class="darkbtn">深色按钮</div>
+<svg class="icon" width="20" height="20"><path d="M2 2h16v16H2z"/></svg>
 <img class="logo" src="a.png">
 <script>var x = 1;</script>
 </body></html>`;
@@ -73,6 +75,9 @@ function engineSection() {
   t('A11 生成了深色底', /background-color:hsla\(0,0%,6%,1\)/.test(st.textContent), true);
   t('A12 生成了浅色字', /color:hsla\(0,0%,80%,1\)/.test(st.textContent), true);
   t('A13 选择器权重双写', /\[data-bbx-dk="\d+"\]\[data-bbx-dk="\d+"\]/.test(st.textContent), true);
+  t('A16 先铺底色(防白闪)', /html,body\{background-color:#14161a !important\}/.test(st.textContent), true);
+  t('A17 图标反相规则就位', /\[data-bbx-inv="1"\]\{filter:invert\(1\) hue-rotate\(180deg\)/.test(st.textContent), true);
+  t('A18 SVG 深色填充被提亮', /fill:hsla\(/.test(st.textContent), true);
 
   const markedBefore = document.querySelectorAll('[data-bbx-dk]').length;
   dom.window.__bbxDark.disable();
