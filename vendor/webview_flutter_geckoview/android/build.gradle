@@ -16,15 +16,6 @@ buildscript {
     }
 }
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        // GeckoView 官方仓库（AAR 约 250MB，构建时拉取）
-        maven { url "https://maven.mozilla.org/maven2/" }
-    }
-}
-
 apply plugin: "com.android.library"
 apply plugin: "kotlin-android"
 

@@ -23,4 +23,14 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.4.0" apply false
 }
 
+// 所有子项目（app + 各插件）的依赖仓库统一在此声明。
+// GeckoView AAR 只发布在 maven.mozilla.org，必须在列表里。
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://maven.mozilla.org/maven2/") }
+    }
+}
+
 include(":app")
