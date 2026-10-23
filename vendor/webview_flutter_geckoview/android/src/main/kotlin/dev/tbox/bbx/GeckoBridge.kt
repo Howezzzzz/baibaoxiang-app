@@ -29,7 +29,7 @@ object GeckoBridge {
                             result.error("NO_RUNTIME", "GeckoRuntime 未就绪", null)
                             return@setMethodCallHandler
                         }
-                        runtime.storageController.clearData(StorageController.ClearDataFlags.ALL)
+                        runtime.storageController.clearData(StorageController.ClearFlags.ALL)
                         result.success(true)
                     } catch (e: Exception) {
                         Log.e(TAG, "clearAllCache failed", e)
