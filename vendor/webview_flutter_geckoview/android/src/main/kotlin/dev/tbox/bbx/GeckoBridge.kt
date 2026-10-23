@@ -42,6 +42,10 @@ object GeckoBridge {
      */
     private fun setWebDark(enabled: Boolean, result: MethodChannel.Result) {
         WebviewFlutterPlugin.webExtensionPort.accept({ port ->
+            if (port == null) {
+                result.error("NO_PORT", "webExtensionPort 为空", null)
+                return@accept
+            }
             Handler(Looper.getMainLooper()).post {
                 try {
                     port.postMessage(
