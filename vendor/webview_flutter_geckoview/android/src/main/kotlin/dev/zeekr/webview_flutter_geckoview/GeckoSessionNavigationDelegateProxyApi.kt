@@ -31,6 +31,14 @@ class GeckoSessionNavigationDelegateProxyApi(pigeonRegistrar: ProxyApiRegistrar)
                 session: GeckoSession,
                 request: GeckoSession.NavigationDelegate.LoadRequest
             ): GeckoResult<AllowOrDeny> {
+                // 只把「当前窗口」的导航交给 Dart 决策。
+                // 新窗口（window.open / target=_blank）等若不拦下，会被当成主框架外链
+                // → 弹出系统浏览器（实测弹窗就是这个通道）。
+                if (request.target != GeckoSession.NavigationDelegate.TARGET_WINDOW_CURRENT) {
+                    val passthrough = GeckoResult<AllowOrDeny>()
+                    passthrough.complete(AllowOrDeny.ALLOW)
+                    return passthrough
+                }
                 val result = GeckoResult<AllowOrDeny>()
                 this@GeckoSessionNavigationDelegateProxyApi.onLoadRequest(this, session, request) {
                     it.onSuccess { allowOrDeny ->

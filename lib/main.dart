@@ -11,16 +11,13 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_geckoview/webview_flutter_geckoview.dart';
 
 /// 百宝箱安卓壳 —— 把 https://www.tbox.cn/agents/home 装进独立 App。
-/// 非官方、自用。站内跳转留在壳内，外站/外部 scheme 交系统。
+/// 非官方、自用。网页内容一律留在应用内（要外跳用菜单「在浏览器打开」）。
 ///
 /// v2.0.0：渲染内核自 webview_flutter（系统 WebView）换成
 /// vendor/webview_flutter_geckoview（内置 Firefox GeckoView 内核），
 /// 不再依赖系统 WebView 版本——老设备（系统 WebView 停在 Chromium ~80）
 /// 解析不了页面 ES2021 语法的整屏白屏问题根治。
 const String kHomeUrl = 'https://www.tbox.cn/agents/home';
-
-/// 站内域（含子域）：其余一律视为外链 → 系统浏览器。
-const List<String> kInternalDomains = <String>['tbox.cn'];
 
 /// 主框架导航中允许交给系统的 scheme（其余静默拦截，避免莫名跳出浏览器）。
 const Set<String> kUserFacingSchemes = <String>{
@@ -41,7 +38,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.4';
+const String kAppVersion = '2.0.5';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -66,15 +63,6 @@ const MethodChannel kAppBridge = MethodChannel('dev.tbox.bbx/app_bridge');
 /// GeckoView 扩展桥（清缓存等官方接口没有的能力）。
 const MethodChannel kGeckoBridge = MethodChannel('dev.tbox.bbx/gecko_bridge');
 
-bool isInternalUrl(Uri uri) {
-  final h = uri.host;
-  if (h.isEmpty) return false;
-  for (final d in kInternalDomains) {
-    if (h == d || h.endsWith('.$d')) return true;
-  }
-  return false;
-}
-
 /// 导航处置结果。
 enum NavAction {
   /// 留在壳内加载。
@@ -88,15 +76,16 @@ enum NavAction {
 }
 
 /// 导航策略（纯函数，便于测试）：
-/// - 子框架（iframe）属于页面自身 → 一律 navigate（否则跨域 iframe 会被误当外链弹浏览器）
-/// - 主框架 tbox.cn → navigate；其它 http(s) → 系统浏览器
-/// - 其它 scheme → 用户可见的才交系统，其余拦下
+/// - 子框架（iframe）属于页面自身 → 一律 navigate
+/// - http(s)（含站内站外）→ 一律留在应用内
+///   （不再自动跳系统浏览器——那会在页面开子窗口/跨域桥时莫名弹出；
+///   需要外跳用菜单「在浏览器打开」）
+/// - tel/mailto 等用户可见 scheme → external
+/// - 其余 scheme（moz-extension/about/intent 等）→ block
 NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
   if (!isMainFrame) return NavAction.navigate;
   final uri = Uri.parse(rawUrl);
-  if (uri.scheme == 'http' || uri.scheme == 'https') {
-    return isInternalUrl(uri) ? NavAction.navigate : NavAction.external;
-  }
+  if (uri.scheme == 'http' || uri.scheme == 'https') return NavAction.navigate;
   return kUserFacingSchemes.contains(uri.scheme)
       ? NavAction.external
       : NavAction.block;
@@ -143,6 +132,46 @@ class BaibaoxiangApp extends StatefulWidget {
 }
 
 class _BaibaoxiangAppState extends State<BaibaoxiangApp> {
+  /// 主题：system / light / dark（跟随系统 / 日间 / 夜间）
+  String _themeName = 'system';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTheme();
+  }
+
+  ThemeMode get _themeMode => switch (_themeName) {
+    'light' => ThemeMode.light,
+    'dark' => ThemeMode.dark,
+    _ => ThemeMode.system,
+  };
+
+  Future<void> _loadTheme() async {
+    try {
+      final saved = await kAppBridge.invokeMethod<String>('getPref', {
+        'key': 'theme',
+      });
+      if (saved != null && mounted) setState(() => _themeName = saved);
+    } catch (_) {}
+    await _applyWebTheme();
+  }
+
+  Future<void> _setTheme(String name) async {
+    setState(() => _themeName = name);
+    try {
+      await kAppBridge.invokeMethod('setPref', {'key': 'theme', 'value': name});
+    } catch (_) {}
+    await _applyWebTheme();
+  }
+
+  /// 把主题同步给网页（GeckoView 的 prefers-color-scheme）
+  Future<void> _applyWebTheme() async {
+    try {
+      await kGeckoBridge.invokeMethod('setColorScheme', {'scheme': _themeName});
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -156,15 +185,24 @@ class _BaibaoxiangAppState extends State<BaibaoxiangApp> {
         colorSchemeSeed: const Color(0xFF1A73E8),
         brightness: Brightness.dark,
       ),
-      // 深色模式跟随系统
-      themeMode: ThemeMode.system,
-      home: const ShellPage(),
+      themeMode: _themeMode,
+      home: ShellPage(themeName: _themeName, onThemeChanged: _setTheme),
     );
   }
 }
 
 class ShellPage extends StatefulWidget {
-  const ShellPage({super.key});
+  const ShellPage({
+    super.key,
+    required this.themeName,
+    required this.onThemeChanged,
+  });
+
+  /// 当前主题名（system/light/dark）
+  final String themeName;
+
+  /// 切换主题
+  final ValueChanged<String> onThemeChanged;
 
   @override
   State<ShellPage> createState() => _ShellPageState();
@@ -221,7 +259,10 @@ class _ShellPageState extends State<ShellPage> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onNavigationRequest: (request) async {
-            switch (navActionFor(request.url, isMainFrame: request.isMainFrame)) {
+            switch (navActionFor(
+              request.url,
+              isMainFrame: request.isMainFrame,
+            )) {
               case NavAction.navigate:
                 return NavigationDecision.navigate;
               case NavAction.external:
@@ -906,6 +947,36 @@ class _ShellPageState extends State<ShellPage> {
     }
   }
 
+  void _pickTheme() {
+    const options = <(String, String)>[
+      ('system', '跟随系统'),
+      ('light', '日间'),
+      ('dark', '夜间'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (c) => SimpleDialog(
+        title: const Text('主题'),
+        children: [
+          for (final (value, label) in options)
+            SimpleDialogOption(
+              onPressed: () {
+                Navigator.pop(c);
+                widget.onThemeChanged(value);
+              },
+              child: Row(
+                children: [
+                  Expanded(child: Text(label)),
+                  if (widget.themeName == value)
+                    Icon(Icons.check, color: Theme.of(c).colorScheme.primary),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   void _showAbout() {
     showAboutDialog(
       context: context,
@@ -949,6 +1020,8 @@ class _ShellPageState extends State<ShellPage> {
                       _openInBrowser();
                     case 'clear':
                       _clearCache();
+                    case 'theme':
+                      _pickTheme();
                     case 'update':
                       _startUpdateFlow();
                     case 'about':
@@ -959,6 +1032,7 @@ class _ShellPageState extends State<ShellPage> {
                   PopupMenuItem(value: 'reload', child: Text('刷新')),
                   PopupMenuItem(value: 'browser', child: Text('在浏览器打开')),
                   PopupMenuItem(value: 'clear', child: Text('清除缓存')),
+                  PopupMenuItem(value: 'theme', child: Text('主题')),
                   PopupMenuItem(value: 'update', child: Text('检查更新')),
                   PopupMenuItem(value: 'about', child: Text('关于')),
                 ],

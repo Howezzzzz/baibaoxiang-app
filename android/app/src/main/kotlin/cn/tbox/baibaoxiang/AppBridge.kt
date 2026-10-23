@@ -21,6 +21,9 @@ object AppBridge {
 
     private var activity: MainActivity? = null
 
+    private fun prefs(ctx: android.content.Context) =
+        ctx.getSharedPreferences("baibaoxiang", android.content.Context.MODE_PRIVATE)
+
     fun register(messenger: BinaryMessenger, act: MainActivity) {
         activity = act
         MethodChannel(messenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -87,6 +90,26 @@ object AppBridge {
                             }
                         )
                         result.success(true)
+                    }
+
+                    // 简易偏好存取（主题选择等）
+                    "getPref" -> {
+                        val key = call.argument<String>("key")
+                        result.success(
+                            if (key == null) null
+                            else prefs(ctx).getString(key, null)
+                        )
+                    }
+
+                    "setPref" -> {
+                        val key = call.argument<String>("key")
+                        val value = call.argument<String>("value")
+                        if (key == null) {
+                            result.error("BAD_KEY", "key 不能为空", null)
+                        } else {
+                            prefs(ctx).edit().putString(key, value).apply()
+                            result.success(true)
+                        }
                     }
 
                     else -> result.notImplemented()
