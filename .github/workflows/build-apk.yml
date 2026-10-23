@@ -30,14 +30,6 @@ jobs:
       - name: pub get
         run: flutter pub get
 
-      # AGP 9 移除了 getDefaultProguardFile('proguard-android.txt')，
-      # 而 flutter_inappwebview_android 仍在用 → 在构建前就地打补丁（官方 beta 才修）。
-      - name: patch flutter_inappwebview_android for AGP9
-        run: |
-          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android*/android/build.gradle" -print0 \
-            | xargs -0 -r sed -i "s/proguard-android\.txt/proguard-android-optimize.txt/g"
-          find "$HOME/.pub-cache" -path "*flutter_inappwebview_android*/android/build.gradle" -exec grep -Hn "proguard-android" {} \; || true
-
       - name: analyze
         run: flutter analyze
 
@@ -45,8 +37,8 @@ jobs:
         run: flutter test
 
       - name: build apk (release, per-abi)
-        # --no-pub：不然 build 会重跑 pub get，把上面打的插件补丁重新解包覆盖掉
-        run: flutter build apk --release --split-per-abi --no-pub
+        # 只出 arm64-v8a + armeabi-v7a（GeckoView 内核体积大；x86_64 模拟器用户忽略不计，仍用 v1.0.5 老包）
+        run: flutter build apk --release --split-per-abi --target-platform android-arm64,android-arm --no-pub
 
       - name: rename artifacts
         run: |
