@@ -1,12 +1,12 @@
-name: dark-engine-test
+name: dark-mode-test
 
-# 网页深色适配引擎的回归测试（真 DOM 跑 assets/dark_engine.js）。
+# 网页深色适配（扩展 content script）的回归测试：真 DOM 跑 dark_mode.js。
 # 与 build-apk 相互独立：APK 构建不受本任务结果影响。
 on:
   push:
     paths:
-      - 'assets/dark_engine.js'
-      - 'tool/dark_engine_smoke_test.js'
+      - 'vendor/webview_flutter_geckoview/android/src/main/assets/messaging/dark_mode.js'
+      - 'tool/dark_mode_smoke_test.js'
       - '.github/workflows/dark-engine-test.yml'
   workflow_dispatch:
 
@@ -21,4 +21,4 @@ jobs:
       - name: install jsdom
         run: npm i --no-save --no-audit --no-fund jsdom
       - name: run smoke test
-        run: node tool/dark_engine_smoke_test.js
+        run: node tool/dark_mode_smoke_test.js

@@ -5,6 +5,23 @@
 const javascriptChannels = new Map();
 const webExtensionPort = browser.runtime.connectNative("webview_flutter");
 
+// 百宝箱：网页深色适配以扩展自带 content script 形式加载（不经受限端口传大段代码）。
+// 宿主只需通过端口下发 {category:0, type:4, enabled:bool} 开关状态。
+let darkEnabled = false;
+let darkScript = null;
+(async () => {
+    try {
+        darkScript = await browser.contentScripts.register({
+            matches: ["<all_urls>"],
+            js: [{ file: "dark_mode.js" }],
+            runAt: "document_end",
+        });
+        console.info("bbx dark_mode content script registered");
+    } catch (e) {
+        console.error("bbx dark_mode register failed", e);
+    }
+})();
+
 webExtensionPort.onDisconnect.addListener(() => {
     console.info("webExtensionPort disconnected");
 });
@@ -53,6 +70,20 @@ webExtensionPort.onMessage.addListener(async (message) => {
                         reply.result = await browser.cookies.set(details);
                         break;
                     }
+                    case 4: {
+                        // 百宝箱：网页深色适配开关（广播给所有页面里的 content script）
+                        darkEnabled = !!message.enabled;
+                        const tabs = await browser.tabs.query({});
+                        for (const tab of tabs) {
+                            try {
+                                await browser.tabs.sendMessage(tab.id, { __bbxDark: darkEnabled });
+                            } catch (e) {
+                                // 页面里没挂上 content script 就跳过
+                            }
+                        }
+                        reply.result = true;
+                        break;
+                    }
                     default: {
                         throw new TypeError(`illegal type: ${type}`);
                     }
@@ -77,6 +108,11 @@ webExtensionPort.onMessage.addListener(async (message) => {
 });
 
 browser.runtime.onMessage.addListener((message) => {
+    if (typeof message === "object" && !Array.isArray(message) && message !== null &&
+        message.__bbxQuery) {
+        // content script 启动时询问当前开关状态
+        return Promise.resolve({ __bbxDark: darkEnabled });
+    }
     if (typeof message !== "object" || Array.isArray(message) || message === null) {
         return;
     }

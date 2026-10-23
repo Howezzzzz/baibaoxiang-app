@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.8';
+const String kAppVersion = '2.0.9';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -92,17 +92,16 @@ NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
       : NavAction.block;
 }
 
-/// 网页深色适配引擎脚本：单一来源放在 assets/dark_engine.js，
-/// 便于用 node + jsdom 直接做回归测试（tool/dark_engine_smoke_test.js）。
-const String kDarkEngineAsset = 'assets/dark_engine.js';
-
-/// 注入引擎后启用。
-const String kDarkEnableCall =
-    '\nif (window.__bbxDark) { window.__bbxDark.enable(); }';
-
-/// 停用并清理注入（含旧版反相实现的残留样式）。
-const String kDarkDisableCall =
-    'if (window.__bbxDark) { window.__bbxDark.disable(); }';
+/// 网页适配诊断探针（小脚本，走插件原有 JS 通道即可）。
+/// 引擎本体是扩展自带的 content script（dark_mode.js），不经端口传大段代码。
+const String kDarkProbeJs =
+    "JSON.stringify({e:typeof window.__bbxDark,"
+    "st:!!document.getElementById('__bbx_dark_style'),"
+    "mk:document.querySelectorAll('[data-bbx-dk]').length,"
+    "bg:document.body?getComputedStyle(document.body).backgroundColor:'',"
+    "n:document.querySelectorAll('*').length,"
+    "err:window.__bbxDarkErr||'',"
+    "stats:window.__bbxDarkStats||null})";
 
 /// 逐段比较版本号：a > b 返回 true（自更新比对用）。
 bool compareVersion(String a, String b) {
@@ -269,16 +268,12 @@ class _ShellPageState extends State<ShellPage> {
   /// 上次生效的界面明暗，用于系统切换时重设网页。
   bool? _lastDark;
 
-  /// 深色适配引擎脚本（启动时从 assets 读一次）。
-  String? _darkEngineJs;
-
   @override
   void initState() {
     super.initState();
     _initController();
     _initAbi();
     _loadForceDarkWeb();
-    _loadDarkEngine();
     // WebView 延后到首帧之后再挂载：平台视图在首帧里挂载，个别设备上会卡住整帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyTimer = Timer(const Duration(milliseconds: 300), () {
@@ -1001,6 +996,42 @@ class _ShellPageState extends State<ShellPage> {
     }
   }
 
+  /// 网页适配诊断：把引擎状态与 DOM 证据摆出来（异常时截图给开发者）。
+  Future<void> _showDarkDiag() async {
+    String detail;
+    final c = _controller;
+    if (c == null) {
+      detail = '内核还没就绪';
+    } else {
+      try {
+        final r = await c
+            .runJavaScriptReturningResult(kDarkProbeJs)
+            .timeout(const Duration(seconds: 5));
+        detail = '$r';
+      } catch (e) {
+        detail = '探测失败：$e';
+      }
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('网页深色适配诊断'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            '开关：$_forceDarkWeb\n当前夜间：$_isDarkNow\n\n$detail',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 主题对话框：三选一 + 网页强制暗色开关。
   void _pickTheme() {
     const options = <(String, String)>[
@@ -1039,19 +1070,24 @@ class _ShellPageState extends State<ShellPage> {
               title: const Text('网页深色适配'),
               subtitle: const Text('站点没自带深色时，自动把浅色样式改写成深色'),
             ),
+            const Divider(height: 1),
+            SimpleDialogOption(
+              onPressed: () {
+                Navigator.pop(c);
+                _showDarkDiag();
+              },
+              child: const Row(
+                children: [
+                  Icon(Icons.bug_report_outlined, size: 18),
+                  SizedBox(width: 8),
+                  Text('网页适配诊断'),
+                ],
+              ),
+            ),
           ],
         ),
       ),
     );
-  }
-
-  Future<void> _loadDarkEngine() async {
-    try {
-      final s = await rootBundle.loadString(kDarkEngineAsset);
-      if (!mounted) return;
-      _darkEngineJs = s;
-      await _applyWebDarkCss(); // 资源就绪后补一次
-    } catch (_) {}
   }
 
   Future<void> _loadForceDarkWeb() async {
@@ -1077,17 +1113,14 @@ class _ShellPageState extends State<ShellPage> {
 
   /// 按当前主题向网页施加/撤销强制暗色。
   Future<void> _applyWebDarkCss() async {
-    final c = _controller;
-    if (c == null || !mounted) return;
+    if (!mounted) return;
     final want = _isDarkNow && _forceDarkWeb;
     try {
-      if (!want) {
-        await c.runJavaScript(kDarkDisableCall);
-        return;
-      }
-      final engine = _darkEngineJs;
-      if (engine == null) return; // 资源尚未就绪，等下次页面加载/主题切换再施
-      await c.runJavaScript(engine + kDarkEnableCall);
+      // 引擎是扩展自带 content script，这里只下发开关（端口对消息体量有限，
+      // 之前把整段引擎经端口传给 tabs.executeScript 会失败）。
+      await kGeckoBridge
+          .invokeMethod('setWebDark', {'enabled': want})
+          .timeout(const Duration(seconds: 4));
     } catch (_) {}
   }
 

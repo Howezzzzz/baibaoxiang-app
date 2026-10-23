@@ -1,8 +1,12 @@
 package dev.tbox.bbx
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import dev.zeekr.webview_flutter_geckoview.WebviewFlutterPlugin
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.StorageController
@@ -27,6 +31,37 @@ object GeckoBridge {
     /** 期望的内容语言；runtime 尚未创建时先记住，创建后补设。 */
     @Volatile
     private var desiredLocales: Array<String>? = null
+
+    /** 给扩展端口发消息用的 id（取大值，避开插件 Dart 侧自增的 id）。 */
+    private var bridgeMsgId = 1000000
+
+    /**
+     * 网页深色适配开关：以扩展端口消息 (category 0 / type 4) 下发给
+     * background.js，它再广播给各页面里由它注册的 content script。
+     * 大段脚本不走端口（端口对消息体量有限），所以 content script 从扩展自带文件加载。
+     */
+    private fun setWebDark(enabled: Boolean, result: MethodChannel.Result) {
+        WebviewFlutterPlugin.webExtensionPort.accept({ port ->
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    port.postMessage(
+                        JSONObject()
+                            .put("category", 0)
+                            .put("type", 4)
+                            .put("id", bridgeMsgId++)
+                            .put("enabled", enabled)
+                    )
+                    result.success(true)
+                } catch (e: Exception) {
+                    Log.e(TAG, "setWebDark failed", e)
+                    result.error("SET_WEB_DARK_FAILED", e.message, null)
+                }
+            }
+        }, { e ->
+            Log.e(TAG, "webExtensionPort unavailable", e)
+            result.error("NO_PORT", e?.message, null)
+        })
+    }
 
     fun attach(messenger: BinaryMessenger, runtimeProvider: () -> GeckoRuntime?) {
         MethodChannel(messenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -76,6 +111,8 @@ object GeckoBridge {
                     runtime.settings.locales = locales
                     result.success(true)
                 }
+
+                "setWebDark" -> setWebDark(call.argument<Boolean>("enabled") ?: false, result)
 
                 else -> result.notImplemented()
             }
