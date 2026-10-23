@@ -1,0 +1,33 @@
+name: webview_flutter_geckoview
+description: A Flutter plugin that provides a WebView widget based on Mozilla's GeckoView control.
+version: 0.0.1+2
+repository: https://github.com/yanshouwang/webview_flutter_geckoview
+topics:
+  - html
+  - webview
+  - webview-flutter
+
+environment:
+  sdk: ^3.10.9
+  flutter: ">=3.3.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  meta: ^1.10.0
+  webview_flutter_platform_interface: ^2.14.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  pigeon: ^26.1.4
+
+flutter:
+  plugin:
+    implements: webview_flutter
+    platforms:
+      android:
+        package: dev.zeekr.webview_flutter_geckoview
+        pluginClass: WebviewFlutterPlugin
+        dartPluginClass: GeckoWebViewPlatform

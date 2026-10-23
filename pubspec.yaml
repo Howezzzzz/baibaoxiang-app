@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.5+6
+version: 2.0.0+7
 
 environment:
   sdk: ^3.13.5
@@ -34,8 +34,12 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  flutter_inappwebview: ^6.1.5
-  shared_preferences: ^2.5.6
+  # v2.0.0：不再用 flutter_inappwebview（系统 WebView），改内置 GeckoView 内核：
+  # webview_flutter 提供官方 API，webview_flutter_geckoview（vendored 本地路径）
+  # 是 GeckoView 平台实现，不依赖系统 WebView 版本。
+  webview_flutter: ^4.10.0
+  webview_flutter_geckoview:
+    path: vendor/webview_flutter_geckoview
   url_launcher: ^6.3.3
 
 dev_dependencies:
