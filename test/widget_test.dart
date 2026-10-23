@@ -31,4 +31,36 @@ void main() {
       expect(compareVersion('1.0', '1.0.0'), isFalse);
     });
   });
+
+  group('navActionFor 导航策略（回归：子框架不得被当外链弹浏览器）', () {
+    test('子框架一律壳内加载（哪怕跨域）', () {
+      expect(
+        navActionFor('https://cdn.example.com/hub.html', isMainFrame: false),
+        NavAction.navigate,
+      );
+      expect(
+        navActionFor('https://other-site.com/x', isMainFrame: false),
+        NavAction.navigate,
+      );
+    });
+
+    test('主框架：站内留壳内，外站交系统', () {
+      expect(navActionFor('https://www.tbox.cn/agents/home', isMainFrame: true),
+          NavAction.navigate);
+      expect(navActionFor('https://m.tbox.cn/x', isMainFrame: true),
+          NavAction.navigate);
+      expect(navActionFor('https://www.baidu.com/', isMainFrame: true),
+          NavAction.external);
+    });
+
+    test('主框架：用户可见 scheme 交系统，其余拦下', () {
+      expect(navActionFor('tel:10086', isMainFrame: true), NavAction.external);
+      expect(navActionFor('mailto:a@b.com', isMainFrame: true), NavAction.external);
+      expect(navActionFor('weixin://x', isMainFrame: true), NavAction.external);
+      expect(navActionFor('moz-extension://abc/page.html', isMainFrame: true),
+          NavAction.block);
+      expect(navActionFor('about:blank', isMainFrame: true), NavAction.block);
+      expect(navActionFor('intent://x', isMainFrame: true), NavAction.block);
+    });
+  });
 }

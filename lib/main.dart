@@ -22,13 +22,26 @@ const String kHomeUrl = 'https://www.tbox.cn/agents/home';
 /// 站内域（含子域）：其余一律视为外链 → 系统浏览器。
 const List<String> kInternalDomains = <String>['tbox.cn'];
 
+/// 主框架导航中允许交给系统的 scheme（其余静默拦截，避免莫名跳出浏览器）。
+const Set<String> kUserFacingSchemes = <String>{
+  'tel',
+  'mailto',
+  'sms',
+  'smsto',
+  'geo',
+  'market',
+  'weixin',
+  'alipay',
+  'alipays',
+};
+
 /// 移动端 UA（部分站点按 UA 分流；这里对齐常见安卓浏览器 UA）。
 const String kMobileUa =
     'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.3';
+const String kAppVersion = '2.0.4';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -60,6 +73,33 @@ bool isInternalUrl(Uri uri) {
     if (h == d || h.endsWith('.$d')) return true;
   }
   return false;
+}
+
+/// 导航处置结果。
+enum NavAction {
+  /// 留在壳内加载。
+  navigate,
+
+  /// 交给系统（浏览器 / 电话 / 邮件等）。
+  external,
+
+  /// 静默拦下（不加载也不外跳）。
+  block,
+}
+
+/// 导航策略（纯函数，便于测试）：
+/// - 子框架（iframe）属于页面自身 → 一律 navigate（否则跨域 iframe 会被误当外链弹浏览器）
+/// - 主框架 tbox.cn → navigate；其它 http(s) → 系统浏览器
+/// - 其它 scheme → 用户可见的才交系统，其余拦下
+NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
+  if (!isMainFrame) return NavAction.navigate;
+  final uri = Uri.parse(rawUrl);
+  if (uri.scheme == 'http' || uri.scheme == 'https') {
+    return isInternalUrl(uri) ? NavAction.navigate : NavAction.external;
+  }
+  return kUserFacingSchemes.contains(uri.scheme)
+      ? NavAction.external
+      : NavAction.block;
 }
 
 /// 逐段比较版本号：a > b 返回 true（自更新比对用）。
@@ -181,15 +221,15 @@ class _ShellPageState extends State<ShellPage> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onNavigationRequest: (request) async {
-            final uri = Uri.parse(request.url);
-            if (uri.scheme == 'http' || uri.scheme == 'https') {
-              if (isInternalUrl(uri)) return NavigationDecision.navigate;
-              await _openExternal(uri);
-              return NavigationDecision.prevent;
+            switch (navActionFor(request.url, isMainFrame: request.isMainFrame)) {
+              case NavAction.navigate:
+                return NavigationDecision.navigate;
+              case NavAction.external:
+                await _openExternal(Uri.parse(request.url));
+                return NavigationDecision.prevent;
+              case NavAction.block:
+                return NavigationDecision.prevent;
             }
-            // tel: / mailto: / alipay: / weixin: 等交给系统
-            await _openExternal(uri);
-            return NavigationDecision.prevent;
           },
           onPageStarted: (url) {
             _loadGen++;
