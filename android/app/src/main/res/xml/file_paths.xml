@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可共享的路径：仅开放应用缓存下的 update/ 子目录（放下载的安装包） -->
+<paths>
+    <cache-path name="update" path="update/" />
+</paths>

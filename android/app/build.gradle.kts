@@ -72,6 +72,11 @@ flutter {
     source = "../.."
 }
 
+dependencies {
+    // 应用内安装更新包需要 FileProvider（androidx.core）
+    implementation("androidx.core:core-ktx:1.15.0")
+}
+
 // GeckoView AAR 只发布在 maven.mozilla.org（:app 聚合解析插件依赖时需要；
 // FlutterPlugin 给每个 project 注入的只有 flutter.io，AGP 默认只有 google/mavenCentral）
 repositories {

@@ -28,7 +28,27 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.2';
+const String kAppVersion = '2.0.3';
+
+/// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
+/// 更新检测与安装包下载都会并发测速，谁快用谁。
+const List<String> kGithubMirrorPrefixes = <String>[
+  '',
+  'https://gh-proxy.com/',
+  'https://ghfast.top/',
+  'https://ghproxy.net/',
+  'https://ghproxy.cc/',
+];
+
+/// 更新检测（GitHub API）候选源：实测仅直连与 gh-proxy 能代理 api.github.com。
+const List<String> kGithubApiPrefixes = <String>['', 'https://gh-proxy.com/'];
+
+/// 最新 release 的 API（不含镜像前缀）。
+const String kLatestReleaseApi =
+    'https://api.github.com/repos/Howezzzzz/baibaoxiang-app/releases/latest';
+
+/// App 自身能力桥（ABI / 缓存目录 / 应用内安装），见 AppBridge.kt。
+const MethodChannel kAppBridge = MethodChannel('dev.tbox.bbx/app_bridge');
 
 /// GeckoView 扩展桥（清缓存等官方接口没有的能力）。
 const MethodChannel kGeckoBridge = MethodChannel('dev.tbox.bbx/gecko_bridge');
@@ -131,10 +151,14 @@ class _ShellPageState extends State<ShellPage> {
   /// 在 GeckoView 新内核下不会再出现，这里主要兜运行时错误）。
   final List<String> _jsErrors = <String>[];
 
+  /// 本机首选 ABI（arm64-v8a / armeabi-v7a），用于选对应架构的更新包。
+  String _deviceAbi = 'arm64-v8a';
+
   @override
   void initState() {
     super.initState();
     _initController();
+    _initAbi();
     // WebView 延后到首帧之后再挂载：平台视图在首帧里挂载，个别设备上会卡住整帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyTimer = Timer(const Duration(milliseconds: 300), () {
@@ -417,59 +441,429 @@ class _ShellPageState extends State<ShellPage> {
     _snack('已清除，请下拉或重新进入');
   }
 
-  Future<void> _checkUpdate() async {
+  Future<void> _initAbi() async {
     try {
-      final req = await HttpClient().getUrl(
-        Uri.parse(
-          'https://api.github.com/repos/Howezzzzz/baibaoxiang-app/releases/latest',
-        ),
-      );
-      final res = await req.close().timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) {
-        _snack('检查更新失败（HTTP ${res.statusCode}）');
-        return;
-      }
-      final body = await res.transform(utf8.decoder).join();
-      final tag = (jsonDecode(body) as Map)['tag_name']?.toString() ?? '';
-      final latest = tag.replaceFirst('v', '');
-      if (latest.isNotEmpty && compareVersion(latest, kAppVersion)) {
-        if (!mounted) return;
-        _showUpdateDialog(tag);
-      } else {
-        _snack('已是最新版本 v$kAppVersion');
-      }
-    } on TimeoutException {
-      _snack('检查更新超时');
-    } catch (_) {
-      _snack('检查更新失败');
-    }
+      final abi = await kAppBridge.invokeMethod<String>('getAbi');
+      if (abi != null && abi.isNotEmpty) _deviceAbi = abi;
+    } catch (_) {}
   }
 
-  void _showUpdateDialog(String tag) {
+  // ---------- 更新：多源并发检测 → 择优下载 → 应用内安装 ----------
+
+  Future<void> _startUpdateFlow() async {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+            SizedBox(width: 16),
+            Text('正在检查更新…'),
+          ],
+        ),
+      ),
+    );
+    final release = await _fetchLatestRelease();
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    if (release == null) {
+      _snack('检查更新失败：网络与镜像都不通');
+      return;
+    }
+    final tag = release['tag_name']?.toString() ?? '';
+    final latest = tag.replaceFirst('v', '');
+    if (!compareVersion(latest, kAppVersion)) {
+      _snack('已是最新版本 v$kAppVersion');
+      return;
+    }
+    final url = _pickApkUrl(release);
+    if (url == null) {
+      _snack('新版本 $tag 里没有匹配本机（$_deviceAbi）的安装包');
+      return;
+    }
+    _showUpdateDialog(tag, url);
+  }
+
+  /// 并发向各候选源取 release 信息，谁先成功用谁。
+  Future<Map<String, dynamic>?> _fetchLatestRelease() async {
+    final completer = Completer<Map<String, dynamic>?>();
+    var pending = kGithubApiPrefixes.length;
+    for (final prefix in kGithubApiPrefixes) {
+      _fetchReleaseVia(prefix).then(
+        (v) {
+          if (v != null) {
+            if (!completer.isCompleted) completer.complete(v);
+          } else {
+            pending--;
+            if (pending == 0 && !completer.isCompleted) {
+              completer.complete(null);
+            }
+          }
+        },
+        onError: (_) {
+          pending--;
+          if (pending == 0 && !completer.isCompleted) completer.complete(null);
+        },
+      );
+    }
+    return completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => null,
+    );
+  }
+
+  Future<Map<String, dynamic>?> _fetchReleaseVia(String prefix) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final req = await client.getUrl(Uri.parse('$prefix$kLatestReleaseApi'));
+      req.headers.set(HttpHeaders.acceptHeader, 'application/vnd.github+json');
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final body = await res.transform(utf8.decoder).join();
+      final j = jsonDecode(body);
+      if (j is Map && j['tag_name'] != null) {
+        return j.cast<String, dynamic>();
+      }
+    } catch (_) {
+      // 该源不可用，交给下一候选
+    } finally {
+      client.close(force: true);
+    }
+    return null;
+  }
+
+  /// 按本机 ABI 选对应安装包地址。
+  String? _pickApkUrl(Map<String, dynamic> release) {
+    final assets = (release['assets'] as List?) ?? const [];
+    String? arm64;
+    String? v7a;
+    for (final a in assets) {
+      if (a is! Map) continue;
+      final name = (a['name'] ?? '').toString();
+      final url = (a['browser_download_url'] ?? '').toString();
+      if (!name.endsWith('.apk') || url.isEmpty) continue;
+      if (name.contains('arm64')) {
+        arm64 = url;
+      } else if (name.contains('armeabi-v7a') || name.contains('armv7')) {
+        v7a = url;
+      }
+    }
+    if (_deviceAbi.contains('64')) return arm64 ?? v7a;
+    return v7a ?? arm64;
+  }
+
+  void _showUpdateDialog(String tag, String apkUrl) {
     showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
         title: const Text('发现新版本'),
-        content: Text('$tag（当前 v$kAppVersion）'),
+        content: Text(
+          '$tag（当前 v$kAppVersion）\n\n可在应用内直接下载安装，下载源会自动择优（直连 / 镜像）。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('稍后'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(c);
+              _openExternal(Uri.parse('${kGithubMirrorPrefixes[1]}$apkUrl'));
+            },
+            child: const Text('浏览器下载'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(c);
+              _downloadAndInstall(apkUrl);
+            },
+            child: const Text('立即更新'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 内置下载（并发测速择源 + 断点续传），完成后提示安装。
+  Future<void> _downloadAndInstall(String apkUrl) async {
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('测速中…');
+    var cancelled = false;
+    final dialog = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('下载更新'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, _) =>
+                  LinearProgressIndicator(value: v > 0 && v < 1 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, _) =>
+                  Text(s, style: const TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => cancelled = true,
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    final file = await _downloadApk(
+      apkUrl,
+      progress: progress,
+      status: status,
+      isCancelled: () => cancelled,
+    );
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    await dialog;
+    progress.dispose();
+    status.dispose();
+    if (!mounted) return;
+    if (file == null) {
+      if (!cancelled) _showDownloadFailedDialog(apkUrl);
+      return;
+    }
+    _showInstallPrompt(file.path);
+  }
+
+  /// 下载 APK：先并发测速各源，按快慢依次尝试；失败换源并断点续传。
+  Future<File?> _downloadApk(
+    String apkUrl, {
+    required ValueNotifier<double> progress,
+    required ValueNotifier<String> status,
+    required bool Function() isCancelled,
+  }) async {
+    try {
+      final cacheDir = await kAppBridge.invokeMethod<String>('getCacheDir');
+      if (cacheDir == null || cacheDir.isEmpty) return null;
+      final dir = Directory('$cacheDir/update');
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final name = Uri.parse(apkUrl).pathSegments.last;
+      final file = File('${dir.path}/$name');
+      // 清掉旧版本残留，避免缓存目录堆积
+      for (final e in dir.listSync()) {
+        if (e is File && !e.path.endsWith('/$name')) {
+          try {
+            e.deleteSync();
+          } catch (_) {}
+        }
+      }
+
+      status.value = '测速中…';
+      final sources = await _rankSources(apkUrl);
+      if (isCancelled()) return null;
+      if (sources.isEmpty) return null;
+      final total = sources.first.total;
+      // 已经是完整包（同版本重复检查）直接复用
+      if (total > 0 && file.existsSync() && file.lengthSync() == total) {
+        progress.value = 1;
+        return file;
+      }
+
+      for (final s in sources) {
+        if (isCancelled()) return null;
+        final label = s.prefix.isEmpty ? '直连' : Uri.parse(s.prefix).host;
+        status.value = '下载中（$label）';
+        try {
+          await _downloadOne(
+            '${s.prefix}$apkUrl',
+            file,
+            total: total,
+            progress: progress,
+            isCancelled: isCancelled,
+          );
+          if (_apkLooksValid(file)) return file;
+        } on _Cancelled {
+          return null;
+        } catch (_) {
+          // 该源失败：换下一个（保留已下字节，续传）
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 并发探测各源首个 256KB 的吞吐，按快慢排序（慢/不可用的被过滤）。
+  Future<List<_Source>> _rankSources(String apkUrl) async {
+    final probes = kGithubMirrorPrefixes.map((prefix) async {
+      final sw = Stopwatch()..start();
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
+      try {
+        final req = await client.getUrl(Uri.parse('$prefix$apkUrl'));
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-262143');
+        final res = await req.close().timeout(const Duration(seconds: 12));
+        if (res.statusCode != 200 && res.statusCode != 206) return null;
+        var total = res.contentLength;
+        if (total < 0) total = 0; // -1 = 未提供 Content-Length
+        final cr = res.headers.value('content-range');
+        if (cr != null && cr.contains('/')) {
+          total = int.tryParse(cr.split('/').last) ?? total;
+        }
+        var got = 0;
+        await for (final chunk in res.timeout(const Duration(seconds: 12))) {
+          got += chunk.length;
+        }
+        sw.stop();
+        if (got < 4096) return null;
+        return _Source(prefix, got / (sw.elapsedMicroseconds / 1e6), total);
+      } catch (_) {
+        return null;
+      } finally {
+        client.close(force: true);
+      }
+    }).toList();
+    final ok = (await Future.wait(probes)).whereType<_Source>().toList();
+    ok.sort((a, b) => b.bps.compareTo(a.bps));
+    return ok;
+  }
+
+  Future<void> _downloadOne(
+    String url,
+    File file, {
+    required int total,
+    required ValueNotifier<double> progress,
+    required bool Function() isCancelled,
+  }) async {
+    var existing = file.existsSync() ? file.lengthSync() : 0;
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      if (existing > 0) {
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=$existing-');
+      }
+      final res = await req.close().timeout(const Duration(seconds: 20));
+      var size = total;
+      if (existing > 0 && res.statusCode == 206) {
+        final cr = res.headers.value('content-range');
+        if (cr != null && cr.contains('/')) {
+          size = int.tryParse(cr.split('/').last) ?? size;
+        }
+      } else if (res.statusCode == 200) {
+        existing = 0; // 服务端不支持续传 → 从头下
+        if (res.contentLength > 0) size = res.contentLength;
+      } else {
+        throw HttpException('HTTP ${res.statusCode}');
+      }
+      final sink = file.openWrite(
+        mode: existing > 0 ? FileMode.append : FileMode.write,
+      );
+      var done = existing;
+      try {
+        await for (final chunk in res.timeout(const Duration(seconds: 30))) {
+          if (isCancelled()) throw const _Cancelled();
+          sink.add(chunk);
+          done += chunk.length;
+          if (size > 0) progress.value = (done / size).clamp(0, 1).toDouble();
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      if (size > 0 && done < size) {
+        throw const HttpException('下载不完整');
+      }
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  bool _apkLooksValid(File f) {
+    try {
+      if (f.lengthSync() < 1024 * 1024) return false;
+      final raf = f.openSync();
+      final head = raf.readSync(2);
+      raf.closeSync();
+      return head.length == 2 && head[0] == 0x50 && head[1] == 0x4B;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _showDownloadFailedDialog(String apkUrl) {
+    showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('下载失败'),
+        content: const Text('所有下载源都没成功。可以重试，或改用浏览器下载（走镜像）。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('稍后'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(c);
+              _openExternal(Uri.parse('${kGithubMirrorPrefixes[1]}$apkUrl'));
+            },
+            child: const Text('浏览器下载'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(c);
+              _downloadAndInstall(apkUrl);
+            },
+            child: const Text('重试'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showInstallPrompt(String path) {
+    showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('下载完成'),
+        content: const Text('点「立即安装」会弹出系统安装界面。首次可能需允许「安装未知应用」，允许后回来再点一次即可。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(c),
             child: const Text('稍后'),
           ),
           FilledButton(
-            onPressed: () {
-              Navigator.pop(c);
-              _openExternal(
-                Uri.parse(
-                  'https://github.com/Howezzzzz/baibaoxiang-app/releases/latest',
-                ),
-              );
-            },
-            child: const Text('去下载'),
+            onPressed: () => _installApk(c, path),
+            child: const Text('立即安装'),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _installApk(BuildContext dialogCtx, String path) async {
+    try {
+      final can =
+          await kAppBridge.invokeMethod<bool>('canInstallPackages') ?? true;
+      if (!can) {
+        await kAppBridge.invokeMethod('openInstallSettings');
+        _snack('请在系统里允许「百宝箱」安装应用，回来后点「立即安装」');
+        return; // 保留对话框，便于允许后重试
+      }
+      await kAppBridge.invokeMethod('installApk', {'path': path});
+      if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+    } catch (e) {
+      _snack('调起安装失败：$e');
+    }
   }
 
   void _showAbout() {
@@ -516,7 +910,7 @@ class _ShellPageState extends State<ShellPage> {
                     case 'clear':
                       _clearCache();
                     case 'update':
-                      _checkUpdate();
+                      _startUpdateFlow();
                     case 'about':
                       _showAbout();
                   }
@@ -645,4 +1039,23 @@ class _LaunchingView extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 下载源测速结果。
+class _Source {
+  const _Source(this.prefix, this.bps, this.total);
+
+  /// 镜像前缀（'' = 直连）。
+  final String prefix;
+
+  /// 实测吞吐（字节/秒）。
+  final double bps;
+
+  /// 文件总大小（字节，0 = 未知）。
+  final int total;
+}
+
+/// 用户主动取消下载。
+class _Cancelled implements Exception {
+  const _Cancelled();
 }
