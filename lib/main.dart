@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.6';
+const String kAppVersion = '2.0.7';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -91,6 +91,31 @@ NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
       ? NavAction.external
       : NavAction.block;
 }
+
+/// 网页强制暗色：站点自身没做 prefers-color-scheme 时的兜底（反相 + 色相回转，
+/// 图片/视频再反相一次还原）。由「主题 → 网页强制暗色」开关控制。
+const String kForceDarkJs = r'''
+(function () {
+  var id = '__bbx_force_dark';
+  var el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement('style');
+    el.id = id;
+    (document.head || document.documentElement).appendChild(el);
+  }
+  el.textContent =
+    'html{background:#101014 !important;filter:invert(1) hue-rotate(180deg) !important;}' +
+    'img,video,canvas,svg,iframe,picture,[style*="background-image"]{filter:invert(1) hue-rotate(180deg) !important;}';
+})();
+''';
+
+/// 取消网页强制暗色。
+const String kRemoveForceDarkJs = r'''
+(function () {
+  var el = document.getElementById('__bbx_force_dark');
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+})();
+''';
 
 /// 逐段比较版本号：a > b 返回 true（自更新比对用）。
 bool compareVersion(String a, String b) {
@@ -251,17 +276,35 @@ class _ShellPageState extends State<ShellPage> {
   /// 本机首选 ABI（arm64-v8a / armeabi-v7a），用于选对应架构的更新包。
   String _deviceAbi = 'arm64-v8a';
 
+  /// 页面不支持深色时是否强制压暗（主题对话框里的开关，默认开）。
+  bool _forceDarkWeb = true;
+
+  /// 上次生效的界面明暗，用于系统切换时重设网页。
+  bool? _lastDark;
+
   @override
   void initState() {
     super.initState();
     _initController();
     _initAbi();
+    _loadForceDarkWeb();
     // WebView 延后到首帧之后再挂载：平台视图在首帧里挂载，个别设备上会卡住整帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyTimer = Timer(const Duration(milliseconds: 300), () {
         if (mounted) setState(() => _webReady = true);
       });
     });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 主题（含跟随系统时的系统切换）变化时，同步网页的强制暗色
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    if (_lastDark != null && _lastDark != dark) {
+      _applyWebDarkCss();
+    }
+    _lastDark = dark;
   }
 
   @override
@@ -313,6 +356,7 @@ class _ShellPageState extends State<ShellPage> {
                 _firstPageReady = true;
               });
             }
+            _applyWebDarkCss(); // 每次页面加载后重施（注入是跟着文档走的）
             _scheduleBlankCheck();
           },
           // 注意：webview_flutter_geckoview（vendored）未实现 setOnWebResourceError
@@ -966,6 +1010,7 @@ class _ShellPageState extends State<ShellPage> {
     }
   }
 
+  /// 主题对话框：三选一 + 网页强制暗色开关。
   void _pickTheme() {
     const options = <(String, String)>[
       ('system', '跟随系统'),
@@ -974,26 +1019,70 @@ class _ShellPageState extends State<ShellPage> {
     ];
     showDialog<void>(
       context: context,
-      builder: (c) => SimpleDialog(
-        title: const Text('主题'),
-        children: [
-          for (final (value, label) in options)
-            SimpleDialogOption(
-              onPressed: () {
-                Navigator.pop(c);
-                widget.onThemeChanged(value);
-              },
-              child: Row(
-                children: [
-                  Expanded(child: Text(label)),
-                  if (widget.themeName == value)
-                    Icon(Icons.check, color: Theme.of(c).colorScheme.primary),
-                ],
+      builder: (c) => StatefulBuilder(
+        builder: (c, setDialogState) => SimpleDialog(
+          title: const Text('主题'),
+          children: [
+            for (final (value, label) in options)
+              SimpleDialogOption(
+                onPressed: () {
+                  Navigator.pop(c);
+                  widget.onThemeChanged(value);
+                },
+                child: Row(
+                  children: [
+                    Expanded(child: Text(label)),
+                    if (widget.themeName == value)
+                      Icon(Icons.check, color: Theme.of(c).colorScheme.primary),
+                  ],
+                ),
               ),
+            const Divider(height: 1),
+            SwitchListTile(
+              value: _forceDarkWeb,
+              onChanged: (v) async {
+                setDialogState(() => _forceDarkWeb = v);
+                await _saveForceDarkWeb(v);
+                await _applyWebDarkCss();
+              },
+              title: const Text('网页强制暗色'),
+              subtitle: const Text('页面自身不支持深色时，用反相方式压暗'),
             ),
-        ],
+          ],
+        ),
       ),
     );
+  }
+
+  Future<void> _loadForceDarkWeb() async {
+    try {
+      final v = await kAppBridge.invokeMethod<String>('getPref', {
+        'key': 'forceDarkWeb',
+      });
+      if (v != null && mounted) setState(() => _forceDarkWeb = v == '1');
+    } catch (_) {}
+  }
+
+  Future<void> _saveForceDarkWeb(bool v) async {
+    try {
+      await kAppBridge.invokeMethod('setPref', {
+        'key': 'forceDarkWeb',
+        'value': v ? '1' : '0',
+      });
+    } catch (_) {}
+  }
+
+  /// 当前是否处于夜间（跟随系统时由 Theme 解析后得出）。
+  bool get _isDarkNow => Theme.of(context).brightness == Brightness.dark;
+
+  /// 按当前主题向网页施加/撤销强制暗色。
+  Future<void> _applyWebDarkCss() async {
+    final c = _controller;
+    if (c == null || !mounted) return;
+    final want = _isDarkNow && _forceDarkWeb;
+    try {
+      await c.runJavaScript(want ? kForceDarkJs : kRemoveForceDarkJs);
+    } catch (_) {}
   }
 
   void _showAbout() {
