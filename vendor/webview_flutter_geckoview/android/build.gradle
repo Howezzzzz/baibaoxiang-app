@@ -16,6 +16,14 @@ buildscript {
     }
 }
 
+// GeckoView AAR 只发布在 maven.mozilla.org：插件自身解析 geckoview 依赖需要
+// （project 级 repositories；:app 聚合解析则由 app/build.gradle.kts 的 repositories 提供）
+repositories {
+    google()
+    mavenCentral()
+    maven { url "https://maven.mozilla.org/maven2/" }
+}
+
 apply plugin: "com.android.library"
 apply plugin: "kotlin-android"
 
