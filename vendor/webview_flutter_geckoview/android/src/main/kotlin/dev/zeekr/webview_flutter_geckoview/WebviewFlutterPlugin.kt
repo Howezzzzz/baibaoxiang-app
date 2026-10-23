@@ -8,6 +8,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
+import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.WebExtension
 
 /**
@@ -30,7 +31,18 @@ class WebviewFlutterPlugin : FlutterPlugin, ActivityAware {
         val proxyApiRegistrar = ProxyApiRegistrar(
             binding.binaryMessenger,
             binding.applicationContext,
-            runtime ?: GeckoRuntime.create(binding.applicationContext).apply {
+            runtime ?: GeckoRuntime.create(
+                binding.applicationContext,
+                // 性能取向：关掉这个壳用不到的子系统，减少每次加载的额外开销
+                GeckoRuntimeSettings.Builder()
+                    .consoleOutput(false)              // 不需要控制台输出
+                    .aboutConfigEnabled(false)         // 不暴露 about:config
+                    .loginAutofillEnabled(false)       // 不做登录自动填充
+                    .translationsOfferPopup(false)     // 不做翻译弹窗
+                    .inputAutoZoomEnabled(false)       // 输入框自动缩放会触发重排
+                    .fontInflation(false)              // 字体膨胀会触发整页重排
+                    .build()
+            ).apply {
                 // this.settings.consoleOutputEnabled = true
                 this.webExtensionController.ensureBuiltIn(
                     "resource://android/assets/messaging/", "messaging@zeekr.dev"

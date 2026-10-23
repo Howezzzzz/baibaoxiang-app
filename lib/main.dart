@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.12';
+const String kAppVersion = '2.0.13';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -311,6 +311,9 @@ class _ShellPageState extends State<ShellPage> {
   /// 上次生效的界面明暗，用于系统切换时重设网页。
   bool? _lastDark;
 
+  /// 上次下发给内核的网页适配开关（未变化就不再打往返）。
+  bool? _lastSentWebDark;
+
   @override
   void initState() {
     super.initState();
@@ -378,7 +381,6 @@ class _ShellPageState extends State<ShellPage> {
             _installErrorCollector();
           },
           onPageFinished: (url) async {
-            _installErrorCollector(); // SPA 路由切换后再兜一次
             if (mounted) {
               setState(() {
                 _loading = false;
@@ -1158,13 +1160,17 @@ class _ShellPageState extends State<ShellPage> {
   Future<void> _applyWebDarkCss() async {
     if (!mounted) return;
     final want = _isDarkNow && _forceDarkWeb;
+    if (_lastSentWebDark == want) return; // 状态没变就不打扰内核
     try {
       // 引擎是扩展自带 content script，这里只下发开关（端口对消息体量有限，
       // 之前把整段引擎经端口传给 tabs.executeScript 会失败）。
       await kGeckoBridge
           .invokeMethod('setWebDark', {'enabled': want})
           .timeout(const Duration(seconds: 4));
-    } catch (_) {}
+      _lastSentWebDark = want;
+    } catch (_) {
+      _lastSentWebDark = null; // 失败则下次再试
+    }
   }
 
   void _showAbout() {

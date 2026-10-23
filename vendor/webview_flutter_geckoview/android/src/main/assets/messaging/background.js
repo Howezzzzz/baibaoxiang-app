@@ -6,29 +6,51 @@ const javascriptChannels = new Map();
 const webExtensionPort = browser.runtime.connectNative("webview_flutter");
 
 // 百宝箱：网页深色适配以扩展自带 content script 形式加载（不经受限端口传大段代码）。
-// 宿主只需通过端口下发 {category:0, type:4, enabled:bool} 开关状态。
+// 宿主通过端口下发 {category:0, type:4, enabled:bool} 开关状态。
+// 只在「开启深色」期间注册该 content script —— 日间模式完全零开销
+// （否则每个页面、每个子框架都要解析执行一遍适配脚本）。
 let darkEnabled = false;
 let darkScript = null;
-(async () => {
-    try {
-        darkScript = await browser.contentScripts.register({
-            matches: ["<all_urls>"],
-            js: [{ file: "dark_mode.js" }],
-            runAt: "document_start",
-            allFrames: true,
-        });
-        console.info("bbx dark_mode content script registered");
-    } catch (e) {
-        console.error("bbx dark_mode register failed", e);
+
+async function setDarkEnabled(on) {
+    darkEnabled = !!on;
+    if (darkEnabled && !darkScript) {
+        try {
+            darkScript = await browser.contentScripts.register({
+                matches: ["<all_urls>"],
+                js: [{ file: "dark_mode.js" }],
+                runAt: "document_start",   // 尽早注入：先铺底色，避免白闪
+                allFrames: true,           // 页面内容在 iframe 里也要覆盖
+            });
+            console.info("bbx dark content script registered");
+        } catch (e) {
+            console.error("bbx dark register failed", e);
+            darkScript = null;
+        }
+    } else if (!darkEnabled && darkScript) {
+        try {
+            await darkScript.unregister();
+        } catch (e) {
+            console.error("bbx dark unregister failed", e);
+        }
+        darkScript = null;
     }
-})();
+    // 广播给已经打开的页面
+    const tabs = await browser.tabs.query({});
+    for (const tab of tabs) {
+        try {
+            await browser.tabs.sendMessage(tab.id, { __bbxDark: darkEnabled });
+        } catch (e) {
+            // 页面里没挂上 content script 就跳过
+        }
+    }
+}
 
 webExtensionPort.onDisconnect.addListener(() => {
     console.info("webExtensionPort disconnected");
 });
 
 webExtensionPort.onMessage.addListener(async (message) => {
-    console.info(`webExtensionPort received: ${JSON.stringify(message)}`);
     if (typeof message !== "object" || Array.isArray(message) || message === null) {
         return;
     }
@@ -72,16 +94,8 @@ webExtensionPort.onMessage.addListener(async (message) => {
                         break;
                     }
                     case 4: {
-                        // 百宝箱：网页深色适配开关（广播给所有页面里的 content script）
-                        darkEnabled = !!message.enabled;
-                        const tabs = await browser.tabs.query({});
-                        for (const tab of tabs) {
-                            try {
-                                await browser.tabs.sendMessage(tab.id, { __bbxDark: darkEnabled });
-                            } catch (e) {
-                                // 页面里没挂上 content script 就跳过
-                            }
-                        }
+                        // 百宝箱：网页深色适配开关（按需注册/注销 content script + 广播）
+                        await setDarkEnabled(!!message.enabled);
                         reply.result = true;
                         break;
                     }
