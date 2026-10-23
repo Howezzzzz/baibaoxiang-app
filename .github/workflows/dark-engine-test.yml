@@ -1,0 +1,24 @@
+name: dark-engine-test
+
+# 网页深色适配引擎的回归测试（真 DOM 跑 assets/dark_engine.js）。
+# 与 build-apk 相互独立：APK 构建不受本任务结果影响。
+on:
+  push:
+    paths:
+      - 'assets/dark_engine.js'
+      - 'tool/dark_engine_smoke_test.js'
+      - '.github/workflows/dark-engine-test.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install jsdom
+        run: npm i --no-save --no-audit --no-fund jsdom
+      - name: run smoke test
+        run: node tool/dark_engine_smoke_test.js

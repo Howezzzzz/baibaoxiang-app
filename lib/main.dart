@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.7';
+const String kAppVersion = '2.0.8';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -92,30 +92,17 @@ NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
       : NavAction.block;
 }
 
-/// 网页强制暗色：站点自身没做 prefers-color-scheme 时的兜底（反相 + 色相回转，
-/// 图片/视频再反相一次还原）。由「主题 → 网页强制暗色」开关控制。
-const String kForceDarkJs = r'''
-(function () {
-  var id = '__bbx_force_dark';
-  var el = document.getElementById(id);
-  if (!el) {
-    el = document.createElement('style');
-    el.id = id;
-    (document.head || document.documentElement).appendChild(el);
-  }
-  el.textContent =
-    'html{background:#101014 !important;filter:invert(1) hue-rotate(180deg) !important;}' +
-    'img,video,canvas,svg,iframe,picture,[style*="background-image"]{filter:invert(1) hue-rotate(180deg) !important;}';
-})();
-''';
+/// 网页深色适配引擎脚本：单一来源放在 assets/dark_engine.js，
+/// 便于用 node + jsdom 直接做回归测试（tool/dark_engine_smoke_test.js）。
+const String kDarkEngineAsset = 'assets/dark_engine.js';
 
-/// 取消网页强制暗色。
-const String kRemoveForceDarkJs = r'''
-(function () {
-  var el = document.getElementById('__bbx_force_dark');
-  if (el && el.parentNode) el.parentNode.removeChild(el);
-})();
-''';
+/// 注入引擎后启用。
+const String kDarkEnableCall =
+    '\nif (window.__bbxDark) { window.__bbxDark.enable(); }';
+
+/// 停用并清理注入（含旧版反相实现的残留样式）。
+const String kDarkDisableCall =
+    'if (window.__bbxDark) { window.__bbxDark.disable(); }';
 
 /// 逐段比较版本号：a > b 返回 true（自更新比对用）。
 bool compareVersion(String a, String b) {
@@ -282,12 +269,16 @@ class _ShellPageState extends State<ShellPage> {
   /// 上次生效的界面明暗，用于系统切换时重设网页。
   bool? _lastDark;
 
+  /// 深色适配引擎脚本（启动时从 assets 读一次）。
+  String? _darkEngineJs;
+
   @override
   void initState() {
     super.initState();
     _initController();
     _initAbi();
     _loadForceDarkWeb();
+    _loadDarkEngine();
     // WebView 延后到首帧之后再挂载：平台视图在首帧里挂载，个别设备上会卡住整帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyTimer = Timer(const Duration(milliseconds: 300), () {
@@ -1045,13 +1036,22 @@ class _ShellPageState extends State<ShellPage> {
                 await _saveForceDarkWeb(v);
                 await _applyWebDarkCss();
               },
-              title: const Text('网页强制暗色'),
-              subtitle: const Text('页面自身不支持深色时，用反相方式压暗'),
+              title: const Text('网页深色适配'),
+              subtitle: const Text('站点没自带深色时，自动把浅色样式改写成深色'),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _loadDarkEngine() async {
+    try {
+      final s = await rootBundle.loadString(kDarkEngineAsset);
+      if (!mounted) return;
+      _darkEngineJs = s;
+      await _applyWebDarkCss(); // 资源就绪后补一次
+    } catch (_) {}
   }
 
   Future<void> _loadForceDarkWeb() async {
@@ -1081,7 +1081,13 @@ class _ShellPageState extends State<ShellPage> {
     if (c == null || !mounted) return;
     final want = _isDarkNow && _forceDarkWeb;
     try {
-      await c.runJavaScript(want ? kForceDarkJs : kRemoveForceDarkJs);
+      if (!want) {
+        await c.runJavaScript(kDarkDisableCall);
+        return;
+      }
+      final engine = _darkEngineJs;
+      if (engine == null) return; // 资源尚未就绪，等下次页面加载/主题切换再施
+      await c.runJavaScript(engine + kDarkEnableCall);
     } catch (_) {}
   }
 
