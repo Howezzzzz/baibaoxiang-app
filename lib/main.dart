@@ -28,7 +28,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.0';
+const String kAppVersion = '2.0.1';
 
 /// GeckoView 扩展桥（清缓存等官方接口没有的能力）。
 const MethodChannel kGeckoBridge = MethodChannel('dev.tbox.bbx/gecko_bridge');
@@ -113,8 +113,6 @@ class ShellPage extends StatefulWidget {
 class _ShellPageState extends State<ShellPage> {
   WebViewController? _controller;
   bool _loading = false;
-  bool _loadError = false;
-  String _errMsg = '';
   bool _pageBlank = false;
   bool _webReady = false;
   bool _firstPageReady = false;
@@ -175,7 +173,6 @@ class _ShellPageState extends State<ShellPage> {
             if (mounted) {
               setState(() {
                 _loading = true;
-                _loadError = false;
                 _pageBlank = false;
                 _diag = '';
               });
@@ -194,18 +191,10 @@ class _ShellPageState extends State<ShellPage> {
             }
             _scheduleBlankCheck();
           },
-          // NOTE: webview_flutter_geckoview（vendored）暂未实现
-          // GeckoView onLoadError → 此回调不会触发；网络错误由 GeckoView
-          // 内置错误页展示（同 Firefox「无法连接」页），空白检测兜底诊断。
-          onWebResourceError: (err) {
-            if (err.isForMainFrame != true) return;
-            if (mounted) {
-              setState(() {
-                _loadError = true;
-                _errMsg = err.description;
-              });
-            }
-          },
+          // 注意：webview_flutter_geckoview（vendored）未实现 setOnWebResourceError
+          // （调用即抛 UnimplementedError），因此这里不能再传该回调。
+          // 网络错误由 GeckoView 内置错误页展示（同 Firefox「无法连接」页），
+          // 页面空白则由下方空白检测兜底诊断。
         ),
       );
     controller.loadRequest(Uri.parse(kHomeUrl));
@@ -417,11 +406,9 @@ class _ShellPageState extends State<ShellPage> {
       ),
     );
     if (ok != true) return;
-    // Cookie（官方接口）
-    try {
-      await WebViewCookieManager().clearCookies();
-    } catch (_) {}
-    // HTTP 缓存 + DOM 存储 + 其余（GeckoView 扩展桥）
+    // GeckoView 扩展桥：HTTP 缓存 + Cookie + DOM 存储一次清干净
+    // （ClearFlags.ALL）。插件的官方 WebViewCookieManager 未实现 clearCookies，
+    // 不能走那条路。
     try {
       await kGeckoBridge.invokeMethod<void>('clearAllCache');
     } catch (e) {
@@ -557,44 +544,8 @@ class _ShellPageState extends State<ShellPage> {
               else if (_controller != null)
                 WebViewWidget(controller: _controller!),
               // 首次页面就绪前盖一层启动视图（GeckoView 首次初始化比系统 WebView 慢）
-              if (_webReady && !_firstPageReady && !_loadError && !_pageBlank)
+              if (_webReady && !_firstPageReady && !_pageBlank)
                 const Positioned.fill(child: _LaunchingView()),
-              if (_loadError)
-                Positioned.fill(
-                  child: ColoredBox(
-                    color: Theme.of(context).colorScheme.surface,
-                    child: Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(32),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.wifi_off, size: 56),
-                            const SizedBox(height: 16),
-                            const Text(
-                              '加载失败，请检查网络',
-                              style: TextStyle(fontSize: 16),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _errMsg,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 20),
-                            FilledButton(
-                              onPressed: () {
-                                setState(() => _loadError = false);
-                                _controller?.loadRequest(Uri.parse(kHomeUrl));
-                              },
-                              child: const Text('重试'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
               if (_pageBlank)
                 Positioned.fill(
                   child: ColoredBox(
