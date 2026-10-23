@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.9';
+const String kAppVersion = '2.0.10';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -94,14 +94,44 @@ NavAction navActionFor(String rawUrl, {required bool isMainFrame}) {
 
 /// 网页适配诊断探针（小脚本，走插件原有 JS 通道即可）。
 /// 引擎本体是扩展自带的 content script（dark_mode.js），不经端口传大段代码。
-const String kDarkProbeJs =
-    "JSON.stringify({e:typeof window.__bbxDark,"
-    "st:!!document.getElementById('__bbx_dark_style'),"
-    "mk:document.querySelectorAll('[data-bbx-dk]').length,"
-    "bg:document.body?getComputedStyle(document.body).backgroundColor:'',"
-    "n:document.querySelectorAll('*').length,"
-    "err:window.__bbxDarkErr||'',"
-    "stats:window.__bbxDarkStats||null})";
+const String kDarkProbeJs = r'''
+(function () {
+  function lightCount() {
+    try {
+      var q = [document.documentElement], i = 0, n = 0, c = 0;
+      while (i < q.length && n < 3000) {
+        var e = q[i++];
+        if (!e || e.nodeType !== 1) continue;
+        n++;
+        var st = getComputedStyle(e);
+        var bg = st.backgroundColor || '';
+        var m = /rgba?\((\d+), ?(\d+), ?(\d+)/.exec(bg);
+        if (m && bg.indexOf('rgba(0, 0, 0, 0)') < 0) {
+          var l = (parseInt(m[1], 10) * 0.299 + parseInt(m[2], 10) * 0.587
+            + parseInt(m[3], 10) * 0.114) / 255;
+          if (l > 0.5) c++;
+        }
+        var ch = e.children;
+        for (var j = 0; j < ch.length; j++) q.push(ch[j]);
+      }
+      return c;
+    } catch (e) { return -1; }
+  }
+  try {
+    return JSON.stringify({
+      e: typeof window.__bbxDark,
+      st: !!document.getElementById('__bbx_dark_style'),
+      mk: document.querySelectorAll('[data-bbx-dk]').length,
+      bg: document.body ? getComputedStyle(document.body).backgroundColor : '',
+      n: document.querySelectorAll('*').length,
+      fr: window.frames.length,
+      light: lightCount(),
+      err: window.__bbxDarkErr || '',
+      stats: window.__bbxDarkStats || null
+    });
+  } catch (x) { return 'probe-error:' + x; }
+})()
+''';
 
 /// 逐段比较版本号：a > b 返回 true（自更新比对用）。
 bool compareVersion(String a, String b) {

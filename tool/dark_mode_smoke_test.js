@@ -138,9 +138,32 @@ async function glueSection() {
   }
 }
 
+async function incrementalSection() {
+  const { w } = bootWithStub(true);
+  await wait(40);
+  t('C1 初始已注入', !!w.document.getElementById('__bbx_dark_style'), true);
+
+  // 新增节点：MutationObserver 应把它也适配掉（防抖 300ms）
+  const div = w.document.createElement('div');
+  div.className = 'card';
+  div.textContent = '后来加的内容';
+  w.document.body.appendChild(div);
+  await wait(500);
+  t('C2 新增元素被适配', div.hasAttribute('data-bbx-dk'), true);
+
+  // 已有元素改 class（背景变浅）→ 应重算
+  const overlay = w.document.querySelector('.overlay');
+  const before = overlay.getAttribute('data-bbx-dk');
+  overlay.className = 'plain';
+  await wait(500);
+  t('C3 样式变化的元素被重算',
+    overlay.getAttribute('data-bbx-sig') !== before, true);
+}
+
 (async () => {
   engineSection();
   await glueSection();
+  await incrementalSection();
   console.log(fail ? ('失败 ' + fail + ' 项') : '全部通过');
   process.exit(fail ? 1 : 0);
 })();

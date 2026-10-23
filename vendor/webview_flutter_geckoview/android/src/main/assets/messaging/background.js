@@ -15,6 +15,7 @@ let darkScript = null;
             matches: ["<all_urls>"],
             js: [{ file: "dark_mode.js" }],
             runAt: "document_end",
+            allFrames: true,
         });
         console.info("bbx dark_mode content script registered");
     } catch (e) {

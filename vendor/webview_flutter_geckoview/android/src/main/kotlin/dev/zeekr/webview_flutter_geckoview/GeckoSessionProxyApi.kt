@@ -1,5 +1,6 @@
 package dev.zeekr.webview_flutter_geckoview
 
+import dev.tbox.bbx.GeckoBridge
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
@@ -109,7 +110,9 @@ class GeckoSessionProxyApi(pigeonRegistrar: ProxyApiRegistrar) :
     }
 
     override fun setPromptDelegate(pigeon_instance: GeckoSession, delegate: GeckoSession.PromptDelegate?) {
-        pigeon_instance.promptDelegate = delegate
+        // 交给百宝箱包装层：插件没实现 onFilePrompt（网页上传选文件），这里补上，
+        // 其余弹窗类型原样转发给插件自己的代理，行为不变。
+        pigeon_instance.promptDelegate = GeckoBridge.wrapPrompts(delegate)
     }
 
     override fun setScrollDelegate(pigeon_instance: GeckoSession, delegate: GeckoSession.ScrollDelegate?) {

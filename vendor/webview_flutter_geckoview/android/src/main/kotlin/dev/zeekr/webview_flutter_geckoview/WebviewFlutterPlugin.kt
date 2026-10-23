@@ -23,6 +23,9 @@ class WebviewFlutterPlugin : FlutterPlugin, ActivityAware {
 
     private var proxyApiRegistrar: ProxyApiRegistrar? = null
 
+    /** 文件选择的结果回调只注册一次 */
+    private var fileResultListenerAdded = false
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         val proxyApiRegistrar = ProxyApiRegistrar(
             binding.binaryMessenger,
@@ -73,17 +76,32 @@ class WebviewFlutterPlugin : FlutterPlugin, ActivityAware {
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         this.proxyApiRegistrar?.setActivity(binding.activity)
+        GeckoBridge.setActivity(binding.activity)
+        if (!fileResultListenerAdded) {
+            binding.addActivityResultListener { requestCode, resultCode, data ->
+                if (requestCode == GeckoBridge.REQ_FILE) {
+                    GeckoBridge.handleFileResult(resultCode, data)
+                    true
+                } else {
+                    false
+                }
+            }
+            fileResultListenerAdded = true
+        }
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         this.proxyApiRegistrar?.setActivity(null)
+        GeckoBridge.setActivity(null)
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         this.proxyApiRegistrar?.setActivity(binding.activity)
+        GeckoBridge.setActivity(binding.activity)
     }
 
     override fun onDetachedFromActivity() {
         this.proxyApiRegistrar?.setActivity(null)
+        GeckoBridge.setActivity(null)
     }
 }
