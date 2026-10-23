@@ -124,25 +124,25 @@ object GeckoBridge {
             override fun onAlertPrompt(
                 session: GeckoSession,
                 prompt: GeckoSession.PromptDelegate.AlertPrompt
-            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> =
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? =
                 inner?.onAlertPrompt(session, prompt) ?: super.onAlertPrompt(session, prompt)
 
             override fun onButtonPrompt(
                 session: GeckoSession,
                 prompt: GeckoSession.PromptDelegate.ButtonPrompt
-            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> =
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? =
                 inner?.onButtonPrompt(session, prompt) ?: super.onButtonPrompt(session, prompt)
 
             override fun onTextPrompt(
                 session: GeckoSession,
                 prompt: GeckoSession.PromptDelegate.TextPrompt
-            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> =
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? =
                 inner?.onTextPrompt(session, prompt) ?: super.onTextPrompt(session, prompt)
 
             override fun onAuthPrompt(
                 session: GeckoSession,
                 prompt: GeckoSession.PromptDelegate.AuthPrompt
-            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> =
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? =
                 inner?.onAuthPrompt(session, prompt) ?: super.onAuthPrompt(session, prompt)
 
             override fun onFilePrompt(
