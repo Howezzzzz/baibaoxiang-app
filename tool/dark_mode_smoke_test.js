@@ -36,7 +36,7 @@ body { background: #ffffff; color: #222222; }
 </style></head><body>
 <div class="card">卡片文字<span class="btn">按钮</span></div>
 <div class="overlay">遮罩</div>
-<div class="hidden">隐藏块</div>
+<div class="hidden">隐藏块<span class="overlay">隐藏子块</span></div>
 <div class="grad">渐变块</div>
 <div class="darkbtn">深色按钮</div>
 <svg class="icon" width="20" height="20"><path d="M2 2h16v16H2z"/></svg>
@@ -60,6 +60,8 @@ function engineSection() {
 
   new Function(fs.readFileSync(ENGINE, 'utf8'))();
   dom.window.__bbxDark.enable();
+  t('A0 启用即先铺底色(风格元素已就位)', !!document.getElementById('__bbx_dark_style'), true);
+  dom.window.__bbxDark.applyNow(); // 测试用同步整轮（真实运行是空闲分片）
 
   const st = document.getElementById('__bbx_dark_style');
   t('A1 注入 style 元素', !!st, true);
@@ -78,6 +80,10 @@ function engineSection() {
   t('A16 先铺底色(防白闪)', /html,body\{background-color:#14161a !important\}/.test(st.textContent), true);
   t('A17 图标反相规则就位', /\[data-bbx-inv="1"\]\{filter:invert\(1\) hue-rotate\(180deg\)/.test(st.textContent), true);
   t('A18 SVG 深色填充被提亮', /fill:hsla\(/.test(st.textContent), true);
+  t('A19 display:none 子树未被标记(整棵跳过)',
+    document.querySelector('.hidden').hasAttribute('data-bbx-dk'), false);
+  t('A20 元素记录样式签名(用于增量判断)',
+    document.querySelector('.card').getAttribute('data-bbx-sig') !== null, true);
 
   const markedBefore = document.querySelectorAll('[data-bbx-dk]').length;
   dom.window.__bbxDark.disable();
@@ -127,6 +133,7 @@ async function glueSection() {
     await wait(20);
     ctx.listener({ __bbxDark: true });
     t('B4 收到开启消息后注入', !!w.document.getElementById('__bbx_dark_style'), true);
+    w.__bbxDark.applyNow();
     t('B5 开启后确有元素被标记',
       w.document.querySelectorAll('[data-bbx-dk]').length > 0, true);
     ctx.listener({ __bbxDark: false });
@@ -147,20 +154,21 @@ async function incrementalSection() {
   const { w } = bootWithStub(true);
   await wait(40);
   t('C1 初始已注入', !!w.document.getElementById('__bbx_dark_style'), true);
+  w.__bbxDark.applyNow();
 
   // 新增节点：MutationObserver 应把它也适配掉（防抖 300ms）
   const div = w.document.createElement('div');
   div.className = 'card';
   div.textContent = '后来加的内容';
   w.document.body.appendChild(div);
-  await wait(500);
+  await wait(800);
   t('C2 新增元素被适配', div.hasAttribute('data-bbx-dk'), true);
 
   // 已有元素改 class（背景变浅）→ 应重算
   const overlay = w.document.querySelector('.overlay');
   const before = overlay.getAttribute('data-bbx-dk');
   overlay.className = 'plain';
-  await wait(500);
+  await wait(800);
   t('C3 样式变化的元素被重算',
     overlay.getAttribute('data-bbx-sig') !== before, true);
 }

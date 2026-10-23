@@ -3,21 +3,27 @@
 // 思路参考 Dark Reader：不做整页反相（反相会毁掉半透明遮罩与固定定位层），
 // 而是逐元素重映射颜色——浅色底改同色系深色、深色文字改浅色，透明度保留。
 //
-// v5：
-//  - document_start 注入，先铺底色（html/body 立刻变暗）→ 不再白闪
-//  - 每元素只取一次计算样式；已处理元素用签名比对，避免重复开销
-//  - 内联 SVG 的深色 fill/stroke 提亮（按钮图标在深底上不再「消失」）
-//  - 小图标图片（≤64px、同源）按平均亮度判断，深色图标自动反相
-//  - 大页面 BFS 遍历 + 增量重算（DOM 变动只算新增/变动节点）
+// v6 性能优化（针对「很卡」）：
+//  1) 读写分离：先用只读阶段批量收集声明，再统一写属性。原实现边读
+//     getComputedStyle 边写 setAttribute，每次写都会让下一次读触发整棵样式
+//     重算（layout thrashing），这是卡顿主因。
+//  2) 空闲分片：BFS 队列按 ≤12ms 一片处理，用 requestIdleCallback 让出主线程，
+//     不再长时间阻塞交互；不再需要「2 秒预算」这种粗暴截断。
+//  3) display:none 子树整棵跳过（SPA 里隐藏模板树往往占了大半 DOM）。
+//  4) 统计不再 querySelectorAll('*') 全量遍历，直接复用遍历计数。
+//  5) 图标采样限频（每 2 秒最多一批，每批 ≤40 张）。
+//  6) 启动时先只写底色（立刻变暗），元素适配交给空闲分片，避免和首屏抢主线程。
 (function () {
     var STYLE_ID = "__bbx_dark_style";
     var MARK = "data-bbx-dk";
+    var SIG = "data-bbx-sig";
     var INV = "data-bbx-inv";
     var IMGDONE = "data-bbx-img";
-    var MAXELEMS = 25000;
-    var BUDGET_MS = 2000;
+    var MAXELEMS = 30000;
     var MAX_RULES = 4000;
-    var MAX_ICONS = 200;
+    var SLICE_MS = 12;
+    var ICON_EVERY_MS = 2000;
+    var ICON_PER_BATCH = 40;
     var SVG_NS = "http://www.w3.org/2000/svg";
     var SKIP = {
         SCRIPT: 1, STYLE: 1, LINK: 1, META: 1, HEAD: 1, TITLE: 1, NOSCRIPT: 1,
@@ -53,7 +59,6 @@
             (Math.round(c.l * 1000) / 10) + "%," + (Math.round(c.a * 1000) / 1000) + ")";
     }
 
-    // light -> dark (keep hue/saturation/alpha, lower lightness)
     function dark(c) {
         var l = (1 - c.l) * 0.30 + 0.06;
         if (l < 0.06) l = 0.06;
@@ -61,7 +66,6 @@
         return { h: c.h, s: c.s * 0.9, l: l, a: c.a };
     }
 
-    // dark -> light (body text / icon strokes)
     function light(c) {
         var l = 1 - c.l;
         if (l < 0.68) l = 0.68;
@@ -80,7 +84,6 @@
         return false;
     }
 
-    // rewrite light colors inside gradients too
     function remapGradient(v) {
         return v.replace(/rgba?\([^()]*\)/g, function (m) {
             var c = parse(m);
@@ -89,15 +92,27 @@
         });
     }
 
-    function declFor(el, cs) {
+    function sigOf(cs) {
+        return cs.backgroundColor + "|" + (cs.backgroundImage || "").length + "|" +
+            cs.color + "|" + cs.borderTopWidth + "|" + cs.borderTopColor + "|" + cs.fill;
+    }
+
+    // 只读：返回 {skip:true}（连子孙一起跳过）或 {decl, sig}
+    function readDecl(el) {
+        var tag = el.tagName ? el.tagName.toUpperCase() : "";
+        if (SKIP[tag]) return null;
+        var cs = g.getComputedStyle(el);
+        if (cs.display === "none") return { skip: true };
+        var marked = el.getAttribute(MARK) !== null;
+        var sig = sigOf(cs);
+        if (marked && el.getAttribute(SIG) === sig) return null; // 无变化
+        if (cs.visibility === "hidden") return null;
         var decl = "";
-        var isSvg = el.namespaceURI === SVG_NS;
-        if (isSvg) {
-            // 按钮里的图标常是内联 SVG 且填充写死深色 → 深底上会「消失」
+        if (el.namespaceURI === SVG_NS) {
             var f = parse(cs.fill), stk = parse(cs.stroke);
             if (f && f.a > 0.05 && isDark(f)) decl += "fill:" + cssOf(light(f)) + " !important;";
             if (stk && stk.a > 0.05 && isDark(stk)) decl += "stroke:" + cssOf(light(stk)) + " !important;";
-            return decl;
+            return { decl: decl, sig: sig };
         }
         var bg = parse(cs.backgroundColor);
         if (bg && bg.a > 0.05 && isLight(bg)) {
@@ -121,101 +136,29 @@
                 decl += "border-color:" + cssOf(dark(bc)) + " !important;";
             }
         }
-        return decl;
+        return { decl: decl, sig: sig };
     }
 
     // ---- state -----------------------------------------------------------
-    var enabled = false, observer = null, timer = null, applying = false;
-    var rules = {}, next = 0, pendingRoots = [];
-
-    // doubled attribute keeps our rules above the page's own !important rules
-    function markSel(n) {
-        return "[" + MARK + '="' + n + '"][' + MARK + '="' + n + '"]';
-    }
-
-    function sig(cs) {
-        return cs.backgroundColor + "|" + (cs.backgroundImage || "").length + "|" +
-            cs.color + "|" + cs.borderTopWidth + "|" + cs.borderTopColor + "|" + cs.fill;
-    }
+    var enabled = false, observer = null, sliceTimer = null, sheetDirty = false;
+    var queue = [], cursor = 0, visited = 0, marksTotal = 0;
+    var rules = {}, next = 0;
+    var curRules = 0, lastIconAt = 0, sliceScheduled = false, sliceCount = 0;
+    var pendingWrites = [];
+    var lastStats = null;
 
     function bootOk() {
         return typeof document !== "undefined" && document.documentElement;
     }
 
-    function walk(roots, cb) {
-        var t0 = Date.now(), seen = 0;
-        // BFS：浅层（撑满页面的大容器）先处理，避免被上限截断时漏掉主体
-        for (var r = 0; r < roots.length; r++) {
-            var queue = [roots[r]], qi = 0;
-            while (qi < queue.length) {
-                if (seen >= MAXELEMS || (Date.now() - t0) > BUDGET_MS) return false;
-                var el = queue[qi++];
-                if (!el || el.nodeType !== 1) continue;
-                seen++;
-                if (!cb(el)) return false;
-                var ch = el.children;
-                for (var i = 0; i < ch.length; i++) queue.push(ch[i]);
-            }
-        }
-        return true;
-    }
-
-    function processEl(el) {
-        var tag = el.tagName ? el.tagName.toUpperCase() : "";
-        if (SKIP[tag]) return true;
-        var cs = g.getComputedStyle(el);
-        var marked = el.getAttribute(MARK) !== null;
-        if (marked && el.getAttribute("data-bbx-sig") === sig(cs)) return true;
-        if (cs.display === "none" || cs.visibility === "hidden") return true;
-        var decl = declFor(el, cs);
-        el.setAttribute("data-bbx-sig", sig(cs));
-        if (!decl) {
-            if (marked) el.removeAttribute(MARK);
-            return true;
-        }
-        var n = String(next++);
-        el.setAttribute(MARK, n);
-        if (!rules[decl]) rules[decl] = [];
-        rules[decl].push(n);
-        return true;
-    }
-
-    // 小图标图片（深色图标在深底上看不见）→ 同源且够小就采样判断，深色则反相
-    function iconPass() {
-        var imgs;
-        try { imgs = document.querySelectorAll("img"); } catch (e) { return; }
-        for (var i = 0; i < imgs.length && i < MAX_ICONS; i++) {
-            var im = imgs[i];
-            if (im.getAttribute(INV) !== null || im.getAttribute(IMGDONE) !== null) continue;
-            var w = im.naturalWidth, h = im.naturalHeight;
-            if (!w || !h || w > 64 || h > 64) continue;
-            var src = im.currentSrc || im.src || "";
-            if (!src || (src.indexOf(location.origin) !== 0 && src.indexOf("data:") !== 0)) continue;
-            im.setAttribute(IMGDONE, "1");
-            try {
-                var c = document.createElement("canvas");
-                c.width = w; c.height = h;
-                var cx = c.getContext("2d");
-                cx.clearRect(0, 0, w, h);
-                cx.drawImage(im, 0, 0);
-                var d = cx.getImageData(0, 0, w, h).data;
-                var lum = 0, n = 0;
-                for (var j = 0; j < d.length; j += 4) {
-                    if (d[j + 3] > 16) {
-                        lum += (0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]) / 255;
-                        n++;
-                    }
-                }
-                if (n > 0 && (lum / n) < 0.45) im.setAttribute(INV, "1");
-            } catch (e) { /* 画布被污染等，放弃该图 */ }
-        }
+    function markSel(n) {
+        return "[" + MARK + '="' + n + '"][' + MARK + '="' + n + '"]';
     }
 
     function writeSheet() {
         var keys = [], k;
         for (k in rules) if (rules[k].length) keys.push(k);
         var out = [
-            // 先铺底色：页面一出现就是暗的，不再白闪
             "html,body{background-color:" + baseBg + " !important}",
             "html{color-scheme:dark !important}",
             "::placeholder{color:#8b939e !important}",
@@ -234,60 +177,174 @@
             (document.head || document.documentElement).appendChild(st);
         }
         if (st.textContent !== text) st.textContent = text;
+        sheetDirty = false;
+        curRules = 0;
+        for (k in rules) curRules += rules[k].length;
     }
 
-    function ruleCount() {
-        var n = 0;
-        for (var k in rules) n += rules[k].length;
-        return n;
+    function resetMarks() {
+        var marked = document.querySelectorAll("[" + MARK + "]");
+        for (var i = 0; i < marked.length; i++) marked[i].removeAttribute(MARK);
+        rules = {};
+        next = 0;
     }
 
-    function apply(roots) {
-        if (!bootOk()) return;
-        applying = true;
-        try {
-            var t0 = Date.now();
-            if (!roots || !roots.length) {
-                rules = {};
-                next = 0;
-                var marked = document.querySelectorAll("[" + MARK + "]");
-                for (var i = 0; i < marked.length; i++) marked[i].removeAttribute(MARK);
-                roots = [document.documentElement];
+    function enqueue(roots) {
+        for (var i = 0; i < roots.length; i++) {
+            var r = roots[i];
+            if (r && r.nodeType === 1) queue.push(r);
+        }
+    }
+
+    function scheduleSlice() {
+        if (sliceScheduled || !enabled) return;
+        sliceScheduled = true;
+        var run = function () { sliceScheduled = false; slice(); };
+        if (g.requestIdleCallback) g.requestIdleCallback(run, { timeout: 400 });
+        else g.setTimeout(run, 20);
+    }
+
+    // 一片：只读收集 → 统一写；每片 ≤ SLICE_MS，避免长时间占用主线程
+    function slice() {
+        if (!enabled) return;
+        var t0 = Date.now();
+        pendingWrites.length = 0;
+        while (cursor < queue.length && visited < MAXELEMS) {
+            if (Date.now() - t0 > SLICE_MS) break;
+            var el = queue[cursor++];
+            if (!el || el.nodeType !== 1) continue;
+            visited++;
+            var r = readDecl(el);
+            if (r === null) continue;
+            if (r.skip) continue;                 // display:none：整棵子树不入队
+            if (r.decl) pendingWrites.push([el, r.decl, r.sig]);
+            else pendingWrites.push([el, "", r.sig]);
+            var ch = el.children, i;
+            for (i = 0; i < ch.length; i++) queue.push(ch[i]);   // BFS：子节点入队尾
+        }
+        // 写阶段（与读阶段分离，避免样式反复重算）
+        for (var w = 0; w < pendingWrites.length; w++) {
+            var pw = pendingWrites[w], e2 = pw[0], decl = pw[1];
+            e2.setAttribute(SIG, pw[2]);
+            if (!decl) {
+                if (e2.getAttribute(MARK) !== null) e2.removeAttribute(MARK);
+                continue;
             }
-            walk(roots, processEl);
-            writeSheet();
-            iconPass();
-            g.__bbxDarkStats = {
-                marks: ruleCount(),
-                nodes: document.querySelectorAll("*").length,
-                rules: Object.keys(rules).length,
-                ms: Date.now() - t0,
-                at: Date.now()
-            };
-        } catch (e) {
-            g.__bbxDarkErr = String(e);
-        } finally {
-            applying = false;
+            if (curRules > MAX_RULES) continue;
+            var n = String(next++);
+            e2.setAttribute(MARK, n);
+            if (!rules[decl]) rules[decl] = [];
+            rules[decl].push(n);
+            rules[decl].length;
+            sheetDirty = true;
+            curRules++;
+        }
+        if (sheetDirty) writeSheet();
+        if (cursor < queue.length && visited < MAXELEMS) { scheduleSlice(); return; }
+        queue = [];
+        cursor = 0;
+        visited = 0;
+        marksTotal = curRules;
+        maybeIconPass();
+        sliceCount++;
+        lastStats = {
+            marks: curRules, rules: Object.keys(rules).length,
+            ms: Date.now() - t0, slices: sliceCount, at: Date.now()
+        };
+        g.__bbxDarkStats = lastStats;
+    }
+
+    // 图标采样：限频限量，避免每次变动都跑 canvas
+    function maybeIconPass(force) {
+        if (typeof document === "undefined") return;
+        var now = Date.now();
+        if (!force && now - lastIconAt < ICON_EVERY_MS) return;
+        lastIconAt = now;
+        var imgs;
+        try { imgs = document.querySelectorAll("img"); } catch (e) { return; }
+        var done = 0;
+        for (var i = 0; i < imgs.length && done < ICON_PER_BATCH; i++) {
+            var im = imgs[i];
+            if (im.getAttribute(INV) !== null || im.getAttribute(IMGDONE) !== null) continue;
+            var w = im.naturalWidth, h = im.naturalHeight;
+            if (!w || !h || w > 64 || h > 64) continue;
+            var src = im.currentSrc || im.src || "";
+            if (!src || (src.indexOf(location.origin) !== 0 && src.indexOf("data:") !== 0)) continue;
+            im.setAttribute(IMGDONE, "1");
+            done++;
+            try {
+                var c = document.createElement("canvas");
+                c.width = w; c.height = h;
+                var cx = c.getContext("2d");
+                cx.clearRect(0, 0, w, h);
+                cx.drawImage(im, 0, 0);
+                var d = cx.getImageData(0, 0, w, h).data;
+                var lum = 0, cnt = 0;
+                for (var j = 0; j < d.length; j += 4) {
+                    if (d[j + 3] > 16) {
+                        lum += (0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]) / 255;
+                        cnt++;
+                    }
+                }
+                if (cnt > 0 && (lum / cnt) < 0.45) im.setAttribute(INV, "1");
+            } catch (e) { /* 跨域/污染，跳过 */ }
         }
     }
 
     function requestApply(roots) {
         if (!enabled) return;
-        if (roots && roots.length) {
-            for (var i = 0; i < roots.length; i++) pendingRoots.push(roots[i]);
+        if (roots && roots.length) enqueue(roots);
+        scheduleSlice();
+    }
+
+    function fullPass() {
+        if (!bootOk()) return;
+        resetMarks();
+        queue = [document.documentElement];
+        cursor = 0;
+        visited = 0;
+        sheetDirty = true;
+        writeSheet();
+        scheduleSlice();
+    }
+
+    // 同步整轮（测试与诊断用）
+    function applyNow() {
+        if (!bootOk()) return;
+        enabled = true;
+        resetMarks();
+        queue = [document.documentElement];
+        cursor = 0;
+        visited = 0;
+        var guard = 0;
+        while (cursor < queue.length && guard++ < MAXELEMS) {
+            var el = queue[cursor++];
+            if (!el || el.nodeType !== 1) continue;
+            var r = readDecl(el);
+            if (r === null) continue;
+            if (r.skip) continue;
+            if (r.decl) {
+                var n = String(next++);
+                el.setAttribute(MARK, n);
+                if (!rules[r.decl]) rules[r.decl] = [];
+                rules[r.decl].push(n);
+            } else if (el.getAttribute(MARK) !== null) {
+                el.removeAttribute(MARK);
+            }
+            el.setAttribute(SIG, r.sig);
+            var ch = el.children, i;
+            for (i = 0; i < ch.length; i++) queue.push(ch[i]);
         }
-        if (timer) return;
-        timer = g.setTimeout(function () {
-            timer = null;
-            var rs = pendingRoots;
-            pendingRoots = [];
-            if (ruleCount() > MAX_RULES) { apply(null); return; }
-            apply(rs);
-        }, 300);
+        queue = [];
+        cursor = 0;
+        writeSheet();
+        maybeIconPass(true);
+        lastStats = { marks: curRules, rules: Object.keys(rules).length, at: Date.now() };
+        g.__bbxDarkStats = lastStats;
     }
 
     function onMutations(records) {
-        if (!enabled || applying) return;
+        if (!enabled) return;
         var roots = [];
         for (var i = 0; i < records.length; i++) {
             var r = records[i];
@@ -300,23 +357,22 @@
                 }
             }
         }
-        requestApply(roots);
+        if (roots.length) requestApply(roots);
     }
 
     function disable() {
         enabled = false;
         if (observer) { observer.disconnect(); observer = null; }
-        if (timer) { g.clearTimeout(timer); timer = null; }
-        pendingRoots = [];
-        rules = {};
-        next = 0;
+        if (sliceTimer) { g.clearTimeout(sliceTimer); sliceTimer = null; }
+        queue = []; cursor = 0; visited = 0; pendingWrites.length = 0;
+        rules = {}; next = 0; curRules = 0; marksTotal = 0;
         if (typeof document === "undefined") return;
         var st = document.getElementById(STYLE_ID);
         if (st && st.parentNode) st.parentNode.removeChild(st);
         var marked = document.querySelectorAll("[" + MARK + "]");
         for (var i = 0; i < marked.length; i++) {
             marked[i].removeAttribute(MARK);
-            marked[i].removeAttribute("data-bbx-sig");
+            marked[i].removeAttribute(SIG);
         }
         var inv = document.querySelectorAll("[" + INV + "]");
         for (var j = 0; j < inv.length; j++) inv[j].removeAttribute(INV);
@@ -324,27 +380,36 @@
 
     function enable() {
         if (!bootOk()) return;
+        var wasOn = enabled;
         enabled = true;
-        // 立刻铺底色（哪怕后面的逐元素适配还没跑完，也不会白屏）
+        // 先只铺底色：立刻变暗，不白闪、不和首屏渲染抢主线程
         writeSheet();
-        apply(null);
-        if (g.MutationObserver && document.documentElement) {
-            if (!observer) {
-                observer = new g.MutationObserver(onMutations);
-                observer.observe(document.documentElement, {
-                    childList: true, subtree: true,
-                    attributes: true, attributeFilter: ["class", "style"]
-                });
-            }
+        if (!observer && g.MutationObserver && document.documentElement) {
+            observer = new g.MutationObserver(onMutations);
+            observer.observe(document.documentElement, {
+                childList: true, subtree: true,
+                attributes: true, attributeFilter: ["class", "style"]
+            });
         }
-        // 图片加载完再判一次图标明暗
         if (!g.__bbxDarkLoadHooked) {
             g.__bbxDarkLoadHooked = true;
-            g.addEventListener("load", function () { if (enabled) requestApply([document.documentElement]); });
+            g.addEventListener("load", function () {
+                if (enabled) { maybeIconPass(true); fullPass(); }
+            });
+        }
+        // 元素适配交给空闲分片（页面还在加载时先让路）
+        if (!wasOn || cursor >= queue.length) {
+            queue = [document.documentElement];
+            cursor = 0;
+            visited = 0;
+            scheduleSlice();
         }
     }
 
-    g.__bbxDark = { version: 5, enable: enable, disable: disable, apply: apply };
+    g.__bbxDark = {
+        version: 6, enable: enable, disable: disable,
+        apply: applyNow, applyNow: applyNow
+    };
 
     // ---- host glue (only inside the web extension content script) --------
     function setEnabled(on) {
