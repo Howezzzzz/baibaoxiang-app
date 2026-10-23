@@ -50,7 +50,7 @@ class WebviewFlutterPlugin : FlutterPlugin, ActivityAware {
                     val error = it ?: NullPointerException("throwable is null")
                     webExtensionPort.completeExceptionally(error)
                 })
-            }.also { runtime = it }.also { GeckoBridge.applyPendingColorScheme(it) },
+            }.also { runtime = it }.also { GeckoBridge.applyPending(it) },
             webExtensionPort,
             FlutterAssetManager.PluginBindingFlutterAssetManager(
                 binding.applicationContext.assets, binding.flutterAssets

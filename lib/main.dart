@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_geckoview/webview_flutter_geckoview.dart';
@@ -38,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.5';
+const String kAppVersion = '2.0.6';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -139,6 +140,7 @@ class _BaibaoxiangAppState extends State<BaibaoxiangApp> {
   void initState() {
     super.initState();
     _loadTheme();
+    _applyWebLocale();
   }
 
   ThemeMode get _themeMode => switch (_themeName) {
@@ -172,11 +174,28 @@ class _BaibaoxiangAppState extends State<BaibaoxiangApp> {
     } catch (_) {}
   }
 
+  /// 内核界面与内容语言固定中文（选词菜单、错误页、页面语言协商）
+  Future<void> _applyWebLocale() async {
+    try {
+      await kGeckoBridge.invokeMethod('setLocales', {
+        'locales': ['zh-CN', 'zh', 'en'],
+      });
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '百宝箱',
       debugShowCheckedModeBanner: false,
+      // 界面固定中文（否则 Material 自带按钮/提示会是英文）
+      locale: const Locale('zh', 'CN'),
+      supportedLocales: const [Locale('zh', 'CN'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFF1A73E8),
         brightness: Brightness.light,

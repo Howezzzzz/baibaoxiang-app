@@ -24,6 +24,10 @@ object GeckoBridge {
     @Volatile
     private var desiredColorScheme: Int? = null
 
+    /** 期望的内容语言；runtime 尚未创建时先记住，创建后补设。 */
+    @Volatile
+    private var desiredLocales: Array<String>? = null
+
     fun attach(messenger: BinaryMessenger, runtimeProvider: () -> GeckoRuntime?) {
         MethodChannel(messenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -59,19 +63,32 @@ object GeckoBridge {
                     result.success(true)
                 }
 
+                "setLocales" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val locales = (call.argument<List<String>>("locales")
+                        ?: listOf("zh-CN", "zh", "en")).toTypedArray()
+                    desiredLocales = locales
+                    val runtime = runtimeProvider()
+                    if (runtime == null) {
+                        result.success(false)
+                        return@setMethodCallHandler
+                    }
+                    runtime.settings.locales = locales
+                    result.success(true)
+                }
+
                 else -> result.notImplemented()
             }
         }
     }
 
-    /** runtime 创建后调用，把此前记下的配色补设上。 */
-    fun applyPendingColorScheme(runtime: GeckoRuntime) {
-        desiredColorScheme?.let {
-            try {
-                runtime.settings.setPreferredColorScheme(it)
-            } catch (e: Exception) {
-                Log.e(TAG, "applyPendingColorScheme failed", e)
-            }
+    /** runtime 创建后调用，把此前记下的设置补上。 */
+    fun applyPending(runtime: GeckoRuntime) {
+        try {
+            desiredColorScheme?.let { runtime.settings.setPreferredColorScheme(it) }
+            desiredLocales?.let { runtime.settings.locales = it }
+        } catch (e: Exception) {
+            Log.e(TAG, "applyPending failed", e)
         }
     }
 }
