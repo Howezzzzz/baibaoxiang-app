@@ -19,9 +19,9 @@
     var SIG = "data-bbx-sig";
     var INV = "data-bbx-inv";
     var IMGDONE = "data-bbx-img";
-    var MAXELEMS = 30000;
+    var MAXELEMS = 15000;
     var MAX_RULES = 4000;
-    var SLICE_MS = 12;
+    var SLICE_MS = 25;
     var ICON_EVERY_MS = 2000;
     var ICON_PER_BATCH = 40;
     var SVG_NS = "http://www.w3.org/2000/svg";
@@ -143,7 +143,7 @@
     var enabled = false, observer = null, sliceTimer = null, sheetDirty = false;
     var queue = [], cursor = 0, visited = 0, marksTotal = 0;
     var rules = {}, next = 0;
-    var curRules = 0, lastIconAt = 0, sliceScheduled = false, sliceCount = 0;
+    var curRules = 0, lastIconAt = 0, chunkTimer = null, sliceCount = 0, lastFullAt = 0;
     var pendingWrites = [];
     var lastStats = null;
 
@@ -196,15 +196,14 @@
         }
     }
 
+    // 分片调度：用定时器保证吞吐。早期版本用 requestIdleCallback，空闲回调来得太慢，
+    // 等于每 400ms 才干 12ms 的活 → 大页面要几分钟才变黑，已弃用。
     function scheduleSlice() {
-        if (sliceScheduled || !enabled) return;
-        sliceScheduled = true;
-        var run = function () { sliceScheduled = false; slice(); };
-        if (g.requestIdleCallback) g.requestIdleCallback(run, { timeout: 400 });
-        else g.setTimeout(run, 20);
+        if (chunkTimer || !enabled) return;
+        chunkTimer = g.setTimeout(function () { chunkTimer = null; slice(); }, 0);
     }
 
-    // 一片：只读收集 → 统一写；每片 ≤ SLICE_MS，避免长时间占用主线程
+    // 一片：只读收集 → 统一写；每片 ≤ SLICE_MS，既不断阻塞主线程、又保证吞吐
     function slice() {
         if (!enabled) return;
         var t0 = Date.now();
@@ -245,6 +244,7 @@
         cursor = 0;
         visited = 0;
         marksTotal = curRules;
+        lastFullAt = Date.now();
         maybeIconPass();
         sliceCount++;
         lastStats = {
@@ -397,8 +397,8 @@
                 if (enabled) { maybeIconPass(true); fullPass(); }
             });
         }
-        // 元素适配交给空闲分片（页面还在加载时先让路）
-        if (!wasOn || cursor >= queue.length) {
+        // 元素适配分片进行；刚跑完不到 2 秒不重启整轮（页面常会反复切前后台）
+        if (!wasOn || (cursor >= queue.length && Date.now() - lastFullAt > 2000)) {
             queue = [document.documentElement];
             cursor = 0;
             visited = 0;
@@ -407,7 +407,8 @@
     }
 
     g.__bbxDark = {
-        version: 6, enable: enable, disable: disable,
+        version: 7,
+        enable: enable, disable: disable,
         apply: applyNow, applyNow: applyNow
     };
 
@@ -419,9 +420,12 @@
     if (typeof browser !== "undefined" && browser && browser.runtime &&
         browser.runtime.onMessage) {
         try {
-            browser.runtime.onMessage.addListener(function (m) {
-                if (m && typeof m.__bbxDark === "boolean") setEnabled(m.__bbxDark);
-            });
+            if (!g.__bbxDarkHooked) {
+                g.__bbxDarkHooked = true;
+                browser.runtime.onMessage.addListener(function (m) {
+                    if (m && typeof m.__bbxDark === "boolean") setEnabled(m.__bbxDark);
+                });
+            }
             var ask = function () {
                 try {
                     browser.runtime.sendMessage({ __bbxQuery: true }).then(function (resp) {

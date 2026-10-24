@@ -35,13 +35,17 @@ async function setDarkEnabled(on) {
         }
         darkScript = null;
     }
-    // 广播给已经打开的页面
+    // 已经打开的页面：开启时补注入一次适配脚本（这些页面是在关闭状态下加载的，
+    // 当时没注册脚本），再广播状态；关闭时只广播（让已注入的页面自己还原）
     const tabs = await browser.tabs.query({});
     for (const tab of tabs) {
         try {
+            if (darkEnabled) {
+                await browser.tabs.executeScript(tab.id, { file: "dark_mode.js" });
+            }
             await browser.tabs.sendMessage(tab.id, { __bbxDark: darkEnabled });
         } catch (e) {
-            // 页面里没挂上 content script 就跳过
+            // 个别页面（about:blank 等）注入不了就跳过
         }
     }
 }
