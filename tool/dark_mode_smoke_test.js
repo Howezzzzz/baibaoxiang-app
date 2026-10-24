@@ -85,6 +85,16 @@ function engineSection() {
   t('A20 元素记录样式签名(用于增量判断)',
     document.querySelector('.card').getAttribute('data-bbx-sig') !== null, true);
 
+  // 回归：整轮重扫（不清标记）不得把已生效的样式撤回 ——
+  // 否则页面会深→白→深 反复横跳（用户看到「黑白一闪一闪」）
+  const before = document.querySelectorAll('[data-bbx-dk]').length;
+  dom.window.__bbxDark.rescan();
+  dom.window.__bbxDark.rescan();
+  const after = document.querySelectorAll('[data-bbx-dk]').length;
+  t('A21 重扫后标记不减少(防撤回)', after >= before && after > 0, true);
+  t('A22 卡片仍是深底规则', /background-color:hsla\(0,0%,6%,1\)/.test(
+    document.getElementById('__bbx_dark_style').textContent), true);
+
   const markedBefore = document.querySelectorAll('[data-bbx-dk]').length;
   dom.window.__bbxDark.disable();
   t('A14 关闭后移除 style', !document.getElementById('__bbx_dark_style'), true);

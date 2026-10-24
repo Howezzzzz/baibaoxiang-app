@@ -40,20 +40,25 @@ function run(label, enginePath, rows) {
   const fastMs = Date.now() - t0;
   const fastCalls = calls;
   const fastMarked = w.document.querySelectorAll('[data-bbx-dk]').length;
-  // 阶段二：兜底同步全量
+  // 阶段二：等后台兜底跑完（v11 抽样通过时会整段免掉）
   const t1 = Date.now();
-  w.__bbxDark.applyNow();
-  const fullMs = Date.now() - t1;
-  const marked = w.document.querySelectorAll('[data-bbx-dk]').length;
-  console.log(`${label}: 节点 ${nodes}`);
-  console.log(`   首屏变黑(enable): ${fastMs}ms，调用 ${fastCalls}，标记 ${fastMarked}`);
-  console.log(`   兜底全量: ${fullMs}ms，累计调用 ${calls}，标记 ${marked}`);
-  return { calls, ms: fastMs, nodes, marked, fastMs, fullMs };
+  return (async () => {
+    await new Promise((r) => setTimeout(r, 6000));
+    const totalMs = Date.now() - t0;
+    const marked = w.document.querySelectorAll('[data-bbx-dk]').length;
+    console.log(`${label}: 节点 ${nodes}`);
+    console.log(`   启用即变黑: ${fastMs}ms，调用 ${fastCalls}，标记 ${fastMarked}`);
+    console.log(`   后台兜底后: 累计调用 ${calls}，标记 ${marked}，总耗时 ${totalMs}ms`
+      + `（兜底${calls === fastCalls ? '已免掉' : '跑了'}）`);
+    return { calls, ms: fastMs, nodes, marked, fastMs, totalMs };
+  })();
 }
 
 const rows = Number(process.argv[3] || 1500);
-const a = run('优化前(v8)', process.argv[2] === 'both' ? '/tmp/engine_v8_baseline.js' : process.argv[2], rows);
-const b = run('优化后(v9)', path.join(__dirname, '..', 'vendor', 'webview_flutter_geckoview',
+(async () => {
+const a = await run('优化前(v8)', process.argv[2] === 'both' ? '/tmp/engine_v8_baseline.js' : process.argv[2], rows);
+const b = await run('优化后(v11)', path.join(__dirname, '..', 'vendor', 'webview_flutter_geckoview',
   'android', 'src', 'main', 'assets', 'messaging', 'dark_mode.js'), rows);
-console.log(`=> 首屏变黑耗时: ${a.fastMs}ms → ${b.fastMs}ms（下降 ${(100 * (1 - b.fastMs / Math.max(a.fastMs, 1))).toFixed(1)}%）`);
-console.log(`=> 首屏阶段样式计算调用: ${a.calls && 0}—见上行明细；全量调用 ${a.calls} → ${b.calls}`);
+console.log(`=> 变黑耗时(基准不做快速通道时需等兜底): 见上行`);
+console.log(`=> 累计样式计算调用: ${a.calls} → ${b.calls}（下降 ${(100 * (1 - b.calls / a.calls)).toFixed(1)}%）`);
+})();

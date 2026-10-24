@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.16';
+const String kAppVersion = '2.0.17';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -127,9 +127,25 @@ const String kDarkProbeJs = r'''
     } catch (e) { res.susp.push('scan-error:' + e); }
     return res;
   }
+  function pagePerf() {
+    try {
+      var t = (performance && performance.timing) || null;
+      if (!t) return null;
+      var nav = 0;
+      try { nav = performance.getEntriesByType('navigation')[0].startTime; } catch (e) {}
+      return {
+        dcl: t.domContentLoadedEventEnd - t.navigationStart,
+        load: t.loadEventEnd ? t.loadEventEnd - t.navigationStart : -1,
+        res: (function () {
+          try { return performance.getEntriesByType('resource').length; } catch (e) { return -1; }
+        })()
+      };
+    } catch (e) { return null; }
+  }
   try {
     var p = scan();
     return JSON.stringify({
+      perf: pagePerf(),
       e: typeof window.__bbxDark,
       st: !!document.getElementById('__bbx_dark_style'),
       mk: document.querySelectorAll('[data-bbx-dk]').length,
@@ -140,6 +156,7 @@ const String kDarkProbeJs = r'''
       light: p.light,
       susp: p.susp,
       err: window.__bbxDarkErr || '',
+      fast: window.__bbxDarkFast || null,
       stats: window.__bbxDarkStats || null
     });
   } catch (x) { return 'probe-error:' + x; }

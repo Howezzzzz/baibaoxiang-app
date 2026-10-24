@@ -65,7 +65,15 @@ class WebviewFlutterPlugin : FlutterPlugin, ActivityAware {
                     val error = it ?: NullPointerException("throwable is null")
                     webExtensionPort.completeExceptionally(error)
                 })
-            }.also { runtime = it }.also { GeckoBridge.applyPending(it) },
+            }.also { runtime = it }.also {
+                // 权威 DNS 解析即可；不做 DoH 自动选择（省掉一次额外的解析往返）
+                try {
+                    it.settings.dohAutoselectEnabled = false
+                } catch (e: Exception) {
+                    android.util.Log.w("BBX", "dohAutoselect off failed", e)
+                }
+                GeckoBridge.applyPending(it)
+            },
             webExtensionPort,
             FlutterAssetManager.PluginBindingFlutterAssetManager(
                 binding.applicationContext.assets, binding.flutterAssets

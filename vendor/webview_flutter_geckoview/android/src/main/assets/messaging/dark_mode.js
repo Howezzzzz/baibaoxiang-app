@@ -244,14 +244,12 @@
                 }
             }
         } else if (id !== null) {
-            var o2 = idDecl[id];
-            if (o2 && rules[o2]) {
-                var k = rules[o2].indexOf(id);
-                if (k >= 0) rules[o2].splice(k, 1);
-            }
-            delete idDecl[id];
-            el.removeAttribute(MARK);
-            sheetDirty = true;
+            // 已有标记：保持不动。
+            // 注意：这里绝不能因为「现在算出来是深色」就撤回标记——那深色正是我们
+            // 自己改上去的（再算样式看到的是自己的覆盖值）。撤回会导致
+            // 深 → 白 → 深 反复横跳（用户看到的就是「黑白一闪一闪」）。
+            el.setAttribute(SIG, sig);
+            return;
         }
         el.setAttribute(SIG, sig);
     }
@@ -441,6 +439,22 @@
         return sels;
     }
 
+    // 抽样复核：随机抽 N 个元素，看快速通道是否已经覆盖（避免无谓的全量兜底）
+    function sampleVerify(n) {
+        var all;
+        try { all = document.querySelectorAll("body *"); } catch (e) { return false; }
+        if (!all.length) return true;
+        var step = Math.max(1, Math.floor(all.length / n)), checked = 0, miss = 0;
+        for (var i = 0; i < all.length && checked < n; i += step, checked++) {
+            var el = all[i];
+            if (el.getAttribute(MARK) !== null) continue;
+            var cs = g.getComputedStyle(el);
+            var bg = parse(cs.backgroundColor);
+            if (bg && bg.a > 0.05 && isLight(bg)) miss++;
+        }
+        return miss === 0;
+    }
+
     // 快速通道：命中浅色规则的元素当帧改色（几十~几百个），随后再跑兜底全量遍历
     function fastPass() {
         if (!bootOk()) return;
@@ -482,6 +496,15 @@
         g.__bbxDarkFast = fastStats;
         // 兜底：全量遍历仍然后台跑（跨域样式表、动态样式等漏网情况）
         // CSS 读得到时快通道已覆盖大部分 → 兜底规模调小，省 CPU
+        // 抽样复核：样式表读得到且抽样没发现漏网 → 免掉全量兜底（省下大头 CPU）
+        var verified = sels.length > 0 && sampleVerify(120);
+        fastStats.verified = verified;
+        if (verified) {
+            queue = [];
+            cursor = 0;
+            visited = 0;
+            return;
+        }
         maxElems = sels.length > 0 ? BACKSTOP_CAP_READABLE : BACKSTOP_CAP_OPAQUE;
         queue = [document.documentElement];
         cursor = 0;
@@ -564,10 +587,34 @@
         }
     }
 
+    // 整轮重扫但**不**清空已有标记（与兜底遍历同路径；供回归测试复现
+    // 「重扫后不得撤回已生效的样式」这一条）
+    function rescan() {
+        if (!bootOk()) return;
+        var guard = 0;
+        queue = [document.documentElement];
+        cursor = 0;
+        visited = 0;
+        while (cursor < queue.length && guard++ < BACKSTOP_CAP_OPAQUE) {
+            var el = queue[cursor++];
+            if (!el || el.nodeType !== 1) continue;
+            var r = readDecl(el);
+            if (r === null) continue;
+            if (r.skip) continue;
+            setRule(el, r.decl || "", r.sig);
+            var ch = el.children, i;
+            for (i = 0; i < ch.length; i++) queue.push(ch[i]);
+        }
+        queue = [];
+        cursor = 0;
+        visited = 0;
+        writeSheet();
+    }
+
     g.__bbxDark = {
-        version: 10,
+        version: 12,
         enable: enable, disable: disable,
-        apply: applyNow, applyNow: applyNow
+        apply: applyNow, applyNow: applyNow, rescan: rescan
     };
 
     // ---- host glue (only inside the web extension content script) --------
