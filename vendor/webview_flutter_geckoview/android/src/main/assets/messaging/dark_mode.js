@@ -22,6 +22,9 @@
     var MAXELEMS = 15000;
     var MAX_RULES = 4000;
     var SLICE_MS = 25;
+    var FAST_MAX = 4000;                 // 快速通道单次处理上限
+    var BACKSTOP_CAP_READABLE = 6000;    // CSS 可读时兜底遍历上限
+    var BACKSTOP_CAP_OPAQUE = 15000;     // CSS 读不到时（只能靠全量）上限
     var ICON_EVERY_MS = 2000;
     var ICON_PER_BATCH = 40;
     var SVG_NS = "http://www.w3.org/2000/svg";
@@ -52,6 +55,34 @@
             if (s > 1) s = 1;
         }
         return { h: h, s: s, l: l, a: a };
+    }
+
+    // 作者写法多样（#fff / rgb() / hsl() / 命名色 / var()）——这里只需判断「可能浅色」
+    function maybeLight(v) {
+        if (!v) return false;
+        v = String(v).trim().toLowerCase();
+        if (!v || v === "none" || v === "transparent" || v === "currentcolor" ||
+            v === "auto" || v === "inherit" || v === "initial" || v === "unset") return false;
+        if (v.indexOf("var(") >= 0 || v.indexOf("color-mix(") >= 0) return true;  // 解析不了：保守算浅色
+        var c = parse(v);
+        if (c) return c.a > 0.05 && isLight(c);
+        var h = /^#([0-9a-f]{3,8})$/.exec(v);
+        if (h) {
+            var d = h[1];
+            if (d.length === 3 || d.length === 4) d = d[0] + d[0] + d[1] + d[1] + d[2] + d[2];
+            var r = parseInt(d.substr(0, 2), 16) / 255,
+                gg = parseInt(d.substr(2, 2), 16) / 255,
+                b = parseInt(d.substr(4, 2), 16) / 255;
+            var l = (Math.max(r, gg, b) + Math.min(r, gg, b)) / 2;
+            return l > 0.5;
+        }
+        if (/^hsl/.test(v)) {
+            var hm = /hsl\(\s*([\d.]+)[,\s]+([\d.]+)%[,\s]+([\d.]+)%/.exec(v);
+            if (hm) return parseFloat(hm[3]) / 100 > 0.5;
+            return true;
+        }
+        // 命名色等无法解析：保守算浅色（宁可多处理几个元素，也不漏白）
+        return /^[a-z]+$/.test(v) ? !/^(black|navy|maroon|darkslategray|midnightblue)$/.test(v) : false;
     }
 
     function cssOf(c) {
@@ -144,6 +175,9 @@
     var queue = [], cursor = 0, visited = 0, marksTotal = 0;
     var rules = {}, idDecl = {}, next = 0;
     var curRules = 0, lastIconAt = 0, chunkTimer = null, sliceCount = 0, lastFullAt = 0;
+    var fastStats = null;
+    var maxElems = BACKSTOP_CAP_OPAQUE;
+    var backstopTimer = null;
     var pendingWrites = [];
     var lastStats = null;
 
@@ -186,6 +220,7 @@
         var marked = document.querySelectorAll("[" + MARK + "]");
         for (var i = 0; i < marked.length; i++) marked[i].removeAttribute(MARK);
         rules = {};
+        idDecl = {};
         next = 0;
     }
 
@@ -240,7 +275,7 @@
         if (!enabled) return;
         var t0 = Date.now();
         pendingWrites.length = 0;
-        while (cursor < queue.length && visited < MAXELEMS) {
+        while (cursor < queue.length && visited < maxElems) {
             if (Date.now() - t0 > SLICE_MS) break;
             var el = queue[cursor++];
             if (!el || el.nodeType !== 1) continue;
@@ -258,7 +293,7 @@
             setRule(pendingWrites[w][0], pendingWrites[w][1], pendingWrites[w][2]);
         }
         if (sheetDirty) writeSheet();
-        if (cursor < queue.length && visited < MAXELEMS) { scheduleSlice(); return; }
+        if (cursor < queue.length && visited < maxElems) { scheduleSlice(); return; }
         queue = [];
         cursor = 0;
         visited = 0;
@@ -374,6 +409,91 @@
         if (rest && rest.length) { enqueue(rest); scheduleSlice(); }
     }
 
+    // 从可访问样式表里收集「可能声明了浅色」的选择器（跨域表读不了，交给兜底全量遍历）
+    function collectLightSelectors() {
+        var sels = [], sheets, i, j;
+        try { sheets = document.styleSheets; } catch (e) { return sels; }
+        for (i = 0; i < sheets.length && sels.length < 4000; i++) {
+            var rules = null;
+            try { rules = sheets[i].cssRules; } catch (e) { continue; }
+            if (!rules) continue;
+            for (j = 0; j < rules.length && sels.length < 4000; j++) {
+                var r = rules[j];
+                if (!r || !r.selectorText || !r.style) continue;   // 跳过 @media/@font-face 等
+                var sel = r.selectorText;
+                if (sel.indexOf("::") >= 0 || sel.indexOf(":") === 0) continue;
+                var st = r.style, hit = false;
+                var vals = [
+                    st.getPropertyValue("background-color"), st.getPropertyValue("background"),
+                    st.getPropertyValue("color"),
+                    st.getPropertyValue("border-top-color"), st.getPropertyValue("border-color"),
+                    st.getPropertyValue("background-image")
+                ];
+                for (var k = 0; k < vals.length; k++) {
+                    var v = vals[k];
+                    if (!v) continue;
+                    if (v.indexOf("gradient(") >= 0) { if (remapGradient(v) !== v) { hit = true; break; } }
+                    else if (maybeLight(v)) { hit = true; break; }
+                }
+                if (hit) sels.push(sel);
+            }
+        }
+        return sels;
+    }
+
+    // 快速通道：命中浅色规则的元素当帧改色（几十~几百个），随后再跑兜底全量遍历
+    function fastPass() {
+        if (!bootOk()) return;
+        var sels = collectLightSelectors();
+        sels.push("[style]");                                  // 内联样式元素
+        var joined = null;
+        try { joined = sels.join(","); } catch (e) { joined = null; }
+        if (!joined) {
+            maxElems = BACKSTOP_CAP_OPAQUE;
+            queue = [document.documentElement];
+            cursor = 0;
+            scheduleSlice();
+            return;
+        }
+        var list = null;
+        try { list = document.querySelectorAll(joined); } catch (e) { list = null; }
+        if (!list) {
+            maxElems = BACKSTOP_CAP_OPAQUE;
+            queue = [document.documentElement];
+            cursor = 0;
+            scheduleSlice();
+            return;
+        }
+        var t0 = Date.now(), pending = [], i;
+        // 命中集合通常只有几百个（原生选择器已把范围收窄），一口气处理完；
+        // 超上限的余量交给兜底队列
+        var cap = list.length < FAST_MAX ? list.length : FAST_MAX;
+        for (i = 0; i < cap; i++) {
+            var r = readDecl(list[i]);
+            if (r === null || r.skip) continue;
+            pending.push([list[i], r.decl || "", r.sig]);
+        }
+        for (i = 0; i < pending.length; i++) {
+            setRule(pending[i][0], pending[i][1], pending[i][2]);
+        }
+        writeSheet();
+        fastStats = { selectors: sels.length, matched: list.length, applied: pending.length,
+            ms: Date.now() - t0, at: Date.now() };
+        g.__bbxDarkFast = fastStats;
+        // 兜底：全量遍历仍然后台跑（跨域样式表、动态样式等漏网情况）
+        // CSS 读得到时快通道已覆盖大部分 → 兜底规模调小，省 CPU
+        maxElems = sels.length > 0 ? BACKSTOP_CAP_READABLE : BACKSTOP_CAP_OPAQUE;
+        queue = [document.documentElement];
+        cursor = 0;
+        visited = 0;
+        // 兜底遍历延后 1.2 秒再开始：先把 CPU 让给页面自身的加载与首帧
+        if (backstopTimer) g.clearTimeout(backstopTimer);
+        backstopTimer = g.setTimeout(function () {
+            backstopTimer = null;
+            scheduleSlice();
+        }, 1200);
+    }
+
     // 同步扫描给定根（BFS，预算内），返回没处理完的节点
     function scanSync(roots, budgetMs) {
         var t0 = Date.now(), pending = [], q = [], qi = 0, i, j;
@@ -402,6 +522,8 @@
         enabled = false;
         if (observer) { observer.disconnect(); observer = null; }
         if (sliceTimer) { g.clearTimeout(sliceTimer); sliceTimer = null; }
+        if (backstopTimer) { g.clearTimeout(backstopTimer); backstopTimer = null; }
+        if (chunkTimer) { g.clearTimeout(chunkTimer); chunkTimer = null; }
         queue = []; cursor = 0; visited = 0; pendingWrites.length = 0;
         rules = {}; next = 0; curRules = 0; marksTotal = 0;
         if (typeof document === "undefined") return;
@@ -435,17 +557,15 @@
                 if (enabled) { maybeIconPass(true); fullPass(); }
             });
         }
-        // 元素适配分片进行；刚跑完不到 2 秒不重启整轮（页面常会反复切前后台）
+        // 先走快速通道（命中浅色规则的元素当帧改色），再跑兜底全量遍历；
+        // 刚跑完不到 2 秒不重启（页面常会反复切前后台）
         if (!wasOn || (cursor >= queue.length && Date.now() - lastFullAt > 2000)) {
-            queue = [document.documentElement];
-            cursor = 0;
-            visited = 0;
-            scheduleSlice();
+            fastPass();
         }
     }
 
     g.__bbxDark = {
-        version: 8,
+        version: 10,
         enable: enable, disable: disable,
         apply: applyNow, applyNow: applyNow
     };

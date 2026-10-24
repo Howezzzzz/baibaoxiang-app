@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.15';
+const String kAppVersion = '2.0.16';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -320,6 +320,9 @@ class _ShellPageState extends State<ShellPage> {
   DateTime? _tPageStart;
   DateTime? _tPageFinished;
 
+  /// 页面加载进度（0-100，来自内核回调）
+  int _progress = 0;
+
   @override
   void initState() {
     super.initState();
@@ -380,13 +383,21 @@ class _ShellPageState extends State<ShellPage> {
             if (mounted) {
               setState(() {
                 _loading = true;
+                _progress = 0;
                 _pageBlank = false;
                 _diag = '';
+                // 页面一开始渲染就揭掉启动遮罩：像浏览器一样边加载边看，
+                // 不再用静态启动页盖住整个加载过程（观感上快很多）
+                _firstPageReady = true;
               });
             }
             _blankTimer?.cancel();
-            // 尽早注入 window.onerror 收集 JS 运行时错误（供空白诊断用）
-            _installErrorCollector();
+          },
+          // 进度条走内核真实进度（不确定进度条换成确定进度）
+          onProgress: (p) {
+            if (mounted && p != _progress) {
+              setState(() => _progress = p);
+            }
           },
           onPageFinished: (url) async {
             _tPageFinished = DateTime.now();
@@ -456,12 +467,14 @@ class _ShellPageState extends State<ShellPage> {
       final c = _controller;
       if (c == null || !mounted) return;
       try {
+        // 注意：不用 innerText（它会强制整页排版，大页面上开销很大），
+        // 改用 textContent + 元素计数，判断空白足够
         final r = (await c.runJavaScriptReturningResult('''
           (function() {
             var rm = document.getElementById('root-master');
             var rootChildren = rm ? rm.children.length : -1;
-            var bodyText = (document.body && document.body.innerText || '').length;
-            var rootText = (rm && rm.innerText || '').length;
+            var bodyText = (document.body && document.body.textContent || '').length;
+            var rootText = (rm && rm.textContent || '').length;
             return JSON.stringify({rootChildren: rootChildren, bodyText: bodyText, rootText: rootText});
           })()
         '''));
@@ -480,6 +493,10 @@ class _ShellPageState extends State<ShellPage> {
             url = (await c.currentUrl()) ?? '';
             title = (await c.getTitle()) ?? '';
           } catch (_) {}
+          if (!mounted) return;
+          if (gen != _loadGen) return;
+          // 只在疑似空白时才注入错误收集器（省掉每次页面加载的往返）
+          await _installErrorCollector();
           if (!mounted) return;
           if (gen != _loadGen) return;
           final jsErrors = await _readJsErrors();
@@ -1083,7 +1100,7 @@ class _ShellPageState extends State<ShellPage> {
         content: SingleChildScrollView(
           child: SelectableText(
             '开关：$_forceDarkWeb\n当前夜间：$_isDarkNow\n'
-            '${_timingText()}\n\n$detail',
+            '${_timingText()}\n导航次数：$_loadGen（持续增长说明页面在反复重载）\n\n$detail',
           ),
         ),
         actions: [
@@ -1254,9 +1271,11 @@ class _ShellPageState extends State<ShellPage> {
               ),
             ],
             bottom: _loading
-                ? const PreferredSize(
-                    preferredSize: Size.fromHeight(2),
-                    child: LinearProgressIndicator(),
+                ? PreferredSize(
+                    preferredSize: const Size.fromHeight(2),
+                    child: LinearProgressIndicator(
+                      value: _progress > 0 ? _progress / 100 : null,
+                    ),
                   )
                 : null,
           ),
