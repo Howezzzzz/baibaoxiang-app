@@ -142,7 +142,7 @@
     // ---- state -----------------------------------------------------------
     var enabled = false, observer = null, sliceTimer = null, sheetDirty = false;
     var queue = [], cursor = 0, visited = 0, marksTotal = 0;
-    var rules = {}, next = 0;
+    var rules = {}, idDecl = {}, next = 0;
     var curRules = 0, lastIconAt = 0, chunkTimer = null, sliceCount = 0, lastFullAt = 0;
     var pendingWrites = [];
     var lastStats = null;
@@ -189,6 +189,38 @@
         next = 0;
     }
 
+    // 登记/更新一个元素的声明：复用已有标记 id，原地更新，绝不整表清空
+    function setRule(el, decl, sig) {
+        var id = el.getAttribute(MARK);
+        if (decl) {
+            if (id === null) id = String(next++);
+            var old = idDecl[id];
+            if (old !== decl) {
+                if (old && rules[old]) {
+                    var j = rules[old].indexOf(id);
+                    if (j >= 0) rules[old].splice(j, 1);
+                }
+                if (curRules <= MAX_RULES) {
+                    el.setAttribute(MARK, id);
+                    if (!rules[decl]) rules[decl] = [];
+                    if (rules[decl].indexOf(id) < 0) rules[decl].push(id);
+                    idDecl[id] = decl;
+                    sheetDirty = true;
+                }
+            }
+        } else if (id !== null) {
+            var o2 = idDecl[id];
+            if (o2 && rules[o2]) {
+                var k = rules[o2].indexOf(id);
+                if (k >= 0) rules[o2].splice(k, 1);
+            }
+            delete idDecl[id];
+            el.removeAttribute(MARK);
+            sheetDirty = true;
+        }
+        el.setAttribute(SIG, sig);
+    }
+
     function enqueue(roots) {
         for (var i = 0; i < roots.length; i++) {
             var r = roots[i];
@@ -223,20 +255,7 @@
         }
         // 写阶段（与读阶段分离，避免样式反复重算）
         for (var w = 0; w < pendingWrites.length; w++) {
-            var pw = pendingWrites[w], e2 = pw[0], decl = pw[1];
-            e2.setAttribute(SIG, pw[2]);
-            if (!decl) {
-                if (e2.getAttribute(MARK) !== null) e2.removeAttribute(MARK);
-                continue;
-            }
-            if (curRules > MAX_RULES) continue;
-            var n = String(next++);
-            e2.setAttribute(MARK, n);
-            if (!rules[decl]) rules[decl] = [];
-            rules[decl].push(n);
-            rules[decl].length;
-            sheetDirty = true;
-            curRules++;
+            setRule(pendingWrites[w][0], pendingWrites[w][1], pendingWrites[w][2]);
         }
         if (sheetDirty) writeSheet();
         if (cursor < queue.length && visited < MAXELEMS) { scheduleSlice(); return; }
@@ -299,7 +318,7 @@
 
     function fullPass() {
         if (!bootOk()) return;
-        resetMarks();
+        // 不清空已有标记：整轮重扫只做「更新」，否则样式表会先空掉 → 页面闪白
         queue = [document.documentElement];
         cursor = 0;
         visited = 0;
@@ -323,15 +342,7 @@
             var r = readDecl(el);
             if (r === null) continue;
             if (r.skip) continue;
-            if (r.decl) {
-                var n = String(next++);
-                el.setAttribute(MARK, n);
-                if (!rules[r.decl]) rules[r.decl] = [];
-                rules[r.decl].push(n);
-            } else if (el.getAttribute(MARK) !== null) {
-                el.removeAttribute(MARK);
-            }
-            el.setAttribute(SIG, r.sig);
+            setRule(el, r.decl || "", r.sig);
             var ch = el.children, i;
             for (i = 0; i < ch.length; i++) queue.push(ch[i]);
         }
@@ -357,7 +368,34 @@
                 }
             }
         }
-        if (roots.length) requestApply(roots);
+        if (!roots.length) return;
+        // 同步快扫：新出现的内容当帧就变暗，避免「白的闪一下再变黑」
+        var rest = scanSync(roots, 8);
+        if (rest && rest.length) { enqueue(rest); scheduleSlice(); }
+    }
+
+    // 同步扫描给定根（BFS，预算内），返回没处理完的节点
+    function scanSync(roots, budgetMs) {
+        var t0 = Date.now(), pending = [], q = [], qi = 0, i, j;
+        for (i = 0; i < roots.length; i++) {
+            if (roots[i] && roots[i].nodeType === 1) q.push(roots[i]);
+        }
+        var over = false;
+        while (qi < q.length) {
+            if (Date.now() - t0 > budgetMs) { over = true; break; }
+            var el = q[qi++];
+            var r = readDecl(el);
+            if (r === null) continue;
+            if (r.skip) continue;
+            pending.push([el, r.decl || "", r.sig]);
+            var ch = el.children;
+            for (j = 0; j < ch.length; j++) q.push(ch[j]);
+        }
+        for (i = 0; i < pending.length; i++) {
+            setRule(pending[i][0], pending[i][1], pending[i][2]);
+        }
+        if (pending.length) writeSheet();
+        return over ? q.slice(qi) : null;
     }
 
     function disable() {
@@ -407,7 +445,7 @@
     }
 
     g.__bbxDark = {
-        version: 7,
+        version: 8,
         enable: enable, disable: disable,
         apply: applyNow, applyNow: applyNow
     };

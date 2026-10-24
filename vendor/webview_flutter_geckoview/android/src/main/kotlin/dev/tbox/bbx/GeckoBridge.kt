@@ -94,14 +94,12 @@ object GeckoBridge {
                 }
             }
             try {
+                // 不按 prompt.mimeTypes 过滤：过滤条件与设备上的文件对不上时，
+                // 选择器会把文件全部显示成灰色不可选（网页侧 accept 本来也只是建议）。
                 val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "*/*"
                     putExtra(Intent.EXTRA_ALLOW_MULTIPLE, prompt.type != FILE_TYPE_SINGLE)
-                    val mimes = prompt.mimeTypes
-                    if (mimes != null && mimes.isNotEmpty()) {
-                        putExtra(Intent.EXTRA_MIME_TYPES, mimes)
-                    }
                 }
                 act.startActivityForResult(
                     Intent.createChooser(intent, "选择文件"), REQ_FILE

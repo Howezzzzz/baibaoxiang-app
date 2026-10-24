@@ -161,8 +161,20 @@ async function incrementalSection() {
   div.className = 'card';
   div.textContent = '后来加的内容';
   w.document.body.appendChild(div);
-  await wait(800);
-  t('C2 新增元素被适配', div.hasAttribute('data-bbx-dk'), true);
+  await wait(60);   // 同步快扫：新增内容应当很快（不再等几百毫秒）
+  t('C2 新增元素被适配(同步快扫)', div.hasAttribute('data-bbx-dk'), true);
+
+  // 连续新增：已标记数量不应下降（防「整轮清空样式表」导致页面闪白）
+  const beforeCount = w.document.querySelectorAll('[data-bbx-dk]').length;
+  for (let i = 0; i < 3; i++) {
+    const d = w.document.createElement('div');
+    d.className = 'card';
+    d.textContent = '批量 ' + i;
+    w.document.body.appendChild(d);
+    await wait(40);
+  }
+  t('C4 连续新增后已标记数量不减少', 
+    w.document.querySelectorAll('[data-bbx-dk]').length >= beforeCount, true);
 
   // 已有元素改 class（背景变浅）→ 应重算
   const overlay = w.document.querySelector('.overlay');

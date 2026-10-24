@@ -39,7 +39,7 @@ const String kMobileUa =
     '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /// 当前 App 版本（与 pubspec 同步；自更新比对用）。
-const String kAppVersion = '2.0.14';
+const String kAppVersion = '2.0.15';
 
 /// GitHub 访问镜像前缀（前缀 + 原始完整 URL；'' = 直连）。
 /// 更新检测与安装包下载都会并发测速，谁快用谁。
@@ -314,6 +314,12 @@ class _ShellPageState extends State<ShellPage> {
   /// 上次下发给内核的网页适配开关（未变化就不再打往返）。
   bool? _lastSentWebDark;
 
+  /// 加载计时（诊断用）：启动 → 挂载 / 页面开始 / 加载完成
+  final DateTime _appStart = DateTime.now();
+  DateTime? _tMounted;
+  DateTime? _tPageStart;
+  DateTime? _tPageFinished;
+
   @override
   void initState() {
     super.initState();
@@ -323,6 +329,7 @@ class _ShellPageState extends State<ShellPage> {
     // WebView 延后到首帧之后再挂载：平台视图在首帧里挂载，个别设备上会卡住整帧。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _readyTimer = Timer(const Duration(milliseconds: 300), () {
+        _tMounted = DateTime.now();
         if (mounted) setState(() => _webReady = true);
       });
     });
@@ -367,6 +374,7 @@ class _ShellPageState extends State<ShellPage> {
             }
           },
           onPageStarted: (url) {
+            _tPageStart = DateTime.now();
             _loadGen++;
             _jsErrors.clear();
             if (mounted) {
@@ -381,6 +389,7 @@ class _ShellPageState extends State<ShellPage> {
             _installErrorCollector();
           },
           onPageFinished: (url) async {
+            _tPageFinished = DateTime.now();
             if (mounted) {
               setState(() {
                 _loading = false;
@@ -1041,6 +1050,15 @@ class _ShellPageState extends State<ShellPage> {
     }
   }
 
+  /// 加载计时文本（诊断用）。
+  String _timingText() {
+    String ms(DateTime? a, DateTime? b) =>
+        (a == null || b == null) ? '-' : '${b.difference(a).inMilliseconds}ms';
+    return '计时：启动→挂载 ${ms(_appStart, _tMounted)}'
+        '；启动→页面开始 ${ms(_appStart, _tPageStart)}'
+        '；页面开始→加载完 ${ms(_tPageStart, _tPageFinished)}';
+  }
+
   /// 网页适配诊断：把引擎状态与 DOM 证据摆出来（异常时截图给开发者）。
   Future<void> _showDarkDiag() async {
     String detail;
@@ -1064,7 +1082,8 @@ class _ShellPageState extends State<ShellPage> {
         title: const Text('网页深色适配诊断'),
         content: SingleChildScrollView(
           child: SelectableText(
-            '开关：$_forceDarkWeb\n当前夜间：$_isDarkNow\n\n$detail',
+            '开关：$_forceDarkWeb\n当前夜间：$_isDarkNow\n'
+            '${_timingText()}\n\n$detail',
           ),
         ),
         actions: [
